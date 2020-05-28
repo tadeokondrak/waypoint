@@ -9,7 +9,7 @@ project(
 
 add_project_arguments(
     [
-        # '-D_POSIX_C_SOURCE=200809L',
+        '-D_GNU_SOURCE',
         '-Wno-unused-parameter',
     ],
     language: 'c',
@@ -17,6 +17,7 @@ add_project_arguments(
 
 wayland_client_dep = dependency('wayland-client')
 wayland_protocols_dep = dependency('wayland-protocols')
+xkbcommon_dep = dependency('xkbcommon')
 
 subdir('protocol')
 subdir('src')
@@ -27,6 +28,7 @@ wkeynav_bin = executable(
     include_directories: [inc],
     dependencies: [
         wayland_client_dep,
+        xkbcommon_dep,
         protocols_dep,
     ],
 )
