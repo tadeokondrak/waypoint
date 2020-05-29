@@ -163,25 +163,12 @@ static void move_down(struct state *state, double value) {
 }
 
 static void click(struct state *state) {
-    struct wl_region *region;
-
-    region = wl_compositor_create_region(state->wl_compositor);
-    wl_surface_set_input_region(state->wl_surface, region);
-    wl_region_destroy(region);
-    wl_surface_commit(state->wl_surface);
-
     zwlr_virtual_pointer_v1_button(state->wlr_virtual_pointer, time_ms(), BTN_LEFT,
         WL_POINTER_BUTTON_STATE_PRESSED);
     zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
     zwlr_virtual_pointer_v1_button(state->wlr_virtual_pointer, time_ms(), BTN_LEFT,
         WL_POINTER_BUTTON_STATE_RELEASED);
     zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
-    
-    region = wl_compositor_create_region(state->wl_compositor);
-    wl_region_add(region, 0, 0, INT32_MAX, INT32_MAX);
-    wl_surface_set_input_region(state->wl_surface, region);
-    wl_region_destroy(region);
-    wl_surface_commit(state->wl_surface);
 }
 
 static void quit(struct state *state) {
@@ -275,62 +262,6 @@ static void wl_output_global(struct state *state, void *bound) {
     wl_output_add_listener(bound, &wl_output_listener, output);
     wl_list_insert(&state->outputs, &output->link);
 }
-
-static void wl_pointer_enter(void *data, struct wl_pointer *wl_pointer,
-    uint32_t serial, struct wl_surface *surface,
-    wl_fixed_t surface_x, wl_fixed_t surface_y)
-{
-}
-
-static void wl_pointer_leave(void *data, struct wl_pointer *wl_pointer,
-    uint32_t serial, struct wl_surface *surface)
-{
-}
-
-static void wl_pointer_motion(void *data, struct wl_pointer *wl_pointer,
-    uint32_t time, wl_fixed_t surface_x, wl_fixed_t surface_y)
-{
-}
-
-static void wl_pointer_button(void *data, struct wl_pointer *wl_pointer,
-    uint32_t serial, uint32_t time, uint32_t button, uint32_t state)
-{
-}
-
-static void wl_pointer_axis(void *data, struct wl_pointer *wl_pointer,
-    uint32_t time, uint32_t axis, wl_fixed_t value)
-{
-}
-
-static void wl_pointer_frame(void *data, struct wl_pointer *wl_pointer) {
-}
-
-static void wl_pointer_axis_source(void *data, struct wl_pointer *wl_pointer,
-    uint32_t axis_source)
-{
-}
-
-static void wl_pointer_axis_stop(void *data, struct wl_pointer *wl_pointer,
-    uint32_t time, uint32_t axis)
-{
-}
-
-static void wl_pointer_axis_discrete(void *data, struct wl_pointer *wl_pointer,
-    uint32_t axis, int32_t discrete)
-{
-}
-
-static const struct wl_pointer_listener wl_pointer_listener = {
-    .enter = wl_pointer_enter,
-    .leave = wl_pointer_leave,
-    .motion = wl_pointer_motion,
-    .button = wl_pointer_button,
-    .axis = wl_pointer_axis,
-    .frame = wl_pointer_frame,
-    .axis_source = wl_pointer_axis_source,
-    .axis_stop = wl_pointer_axis_stop,
-    .axis_discrete = wl_pointer_axis_discrete,
-};
 
 static void wl_keyboard_keymap(void *data, struct wl_keyboard *wl_keyboard,
     uint32_t format, int32_t fd, uint32_t size)
@@ -426,12 +357,6 @@ static void wl_seat_capabilities(void *data, struct wl_seat *wl_seat,
     uint32_t capabilities)
 {
     struct seat *seat = data;
-    if ((capabilities & WL_SEAT_CAPABILITY_POINTER)
-        && seat->wl_pointer == NULL)
-    {
-        seat->wl_pointer = wl_seat_get_pointer(wl_seat);
-        wl_pointer_add_listener(seat->wl_pointer, &wl_pointer_listener, seat);
-    }
     if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD)
         && seat->wl_keyboard == NULL)
     {
@@ -630,6 +555,7 @@ static void wlr_layer_surface_configure(void *data,
     state->surface_width = width;
     state->surface_height = height;
     zwlr_layer_surface_v1_ack_configure(zwlr_layer_surface_v1, serial);
+    update_pointer(state);
     draw(state);
 }
 
@@ -766,7 +692,12 @@ int main(void) {
     state.output = output;
 
     state.wl_surface = wl_compositor_create_surface(state.wl_compositor);
-
+    
+    struct wl_region *region = wl_compositor_create_region(state.wl_compositor);
+    wl_surface_set_input_region(state.wl_surface, region);
+    wl_region_destroy(region);
+    wl_surface_commit(state.wl_surface);
+    
     state.wlr_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
         state.wlr_layer_shell, state.wl_surface, output->wl_output,
         ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "waypoint");
