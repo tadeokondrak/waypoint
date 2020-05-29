@@ -8,6 +8,7 @@ wayland_scanner_bin = find_program(
 
 protocols = {
     'xdg-shell': wayland_protocols_dir / 'stable/xdg-shell/xdg-shell.xml',
+    'xdg-output': wayland_protocols_dir / 'unstable/xdg-output/xdg-output-unstable-v1.xml',
     'wlr-layer-shell-v1': 'wlr-layer-shell-unstable-v1.xml',
     'wlr-virtual-pointer-v1': 'wlr-virtual-pointer-unstable-v1.xml',
 }
@@ -24,7 +25,7 @@ foreach name, path : protocols
     )
 
     protocols_inc += custom_target(
-        name.underscorify() + '_client_protocols_h',
+        name.underscorify() + '_client_protocol_h',
         input: path,
         output: '@BASENAME@-client-protocol.h',
         command: [wayland_scanner_bin, 'client-header', '@INPUT@', '@OUTPUT@']

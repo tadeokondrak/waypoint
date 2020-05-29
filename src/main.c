@@ -2,315 +2,91 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
-#include <assert.h>
 
-#include <unistd.h>
-#include <sys/mman.h>
+#include <time.h>
 
+#include <xkbcommon/xkbcommon.h>
 #include <wayland-client.h>
+#include <linux/input-event-codes.h>
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
+#include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
-struct region {
-    int x, y;
-    int width, height;
-};
+#include "waypoint.h"
 
-struct state {
-    bool running;
-
-    struct wl_display *wl_display;
-    struct wl_registry *wl_registry;
-
-    struct wl_shm *wl_shm;
-    struct wl_compositor *wl_compositor;
-    struct zwlr_layer_shell_v1 *wlr_layer_shell;
-    struct zwlr_virtual_pointer_manager_v1 *wlr_virtual_pointer_manager;
-
-    struct wl_surface *wl_surface;
-    struct zwlr_layer_surface_v1 *wlr_layer_surface;
-
-    struct wl_list buffers;
-
-    int grid_size;
-    int gap_size;
-    double x, y;
-    double width, height;
-};
-
-struct global {
-    const struct wl_interface *interface;
-    const char *name;
-    int version;
-    bool is_singleton;
-    union {
-        size_t offset;
-        void (*callback)(struct state *state, void *data);
-    };
-};
-
-static int global_compare(const void *a, const void *b) {
-    return strcmp(
-        ((struct global *)a)->name,
-        ((struct global *)b)->name
-    );
+static uint32_t time_ms(void) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return now.tv_nsec / 1000;
 }
 
-struct global globals[] = {
-    /* must stay sorted */
-    {
-        .interface = &wl_compositor_interface,
-        .name = "wl_compositor",
-        .version = 4,
-        .is_singleton = true,
-        .offset = offsetof(struct state, wl_compositor),
-    },
-    {
-        .interface = &wl_output_interface,
-        .name = "wl_output",
-        .version = 3,
-        .is_singleton = false,
-        .callback = NULL,
-    },
-    {
-        .interface = &wl_keyboard_interface,
-        .name = "wl_keyboard",
-        .version = 7,
-        .is_singleton = false,
-        .callback = NULL,
-    },
-    {
-        .interface = &wl_shm_interface,
-        .name = "wl_shm",
-        .version = 1,
-        .is_singleton = true,
-        .offset = offsetof(struct state, wl_shm),
-    },
-    {
-        .interface = &zwlr_layer_shell_v1_interface,
-        .name = "zwlr_layer_shell_v1",
-        .version = 2,
-        .is_singleton = true,
-        .offset = offsetof(struct state, wlr_layer_shell),
-    },
-    {
-        .interface = &zwlr_virtual_pointer_manager_v1_interface,
-        .name = "zwlr_virtual_pointer_manager_v1",
-        .version = 2,
-        .is_singleton = true,
-        .offset = offsetof(struct state, wlr_virtual_pointer_manager),
-    },
-};
-
-struct buffer {
-    struct state *state;
-    struct wl_list link;
-
-    struct wl_buffer *wl_buffer;
-    int width, height;
-
-    unsigned char *data;
-    size_t size;
-
-    bool in_use;
-};
-
-static void wl_buffer_release(void *data, struct wl_buffer *wl_buffer) {
-    struct buffer *buffer = data;
-    buffer->in_use = false;
+void update_pointer(struct state *state) {
+    zwlr_virtual_pointer_v1_motion_absolute(
+        state->wlr_virtual_pointer, time_ms(),
+        (state->output->width * state->x) + (state->output->width * state->width / 2),
+        (state->output->height * state->y) + (state->output->height * state->height / 2),
+        state->output->width, state->output->height);
+    zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
 }
 
-static const struct wl_buffer_listener wl_buffer_listener = {
-    .release = wl_buffer_release,
-};
-
-static struct buffer *create_buffer(struct state *state,
-    int width, int height)
-{
-    struct buffer *buffer = malloc(sizeof(struct buffer));
-
-    buffer->width = width;
-    buffer->height = height;
-    buffer->size = buffer->width * 4 * buffer->height;
-    buffer->in_use = true;
-
-    int fd = memfd_create("waypoint", MFD_CLOEXEC);
-    int rc = ftruncate(fd, buffer->size); (void)rc;
-
-    buffer->data =
-        mmap(NULL, buffer->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-    struct wl_shm_pool *pool =
-        wl_shm_create_pool(state->wl_shm, fd, buffer->size);
-
-    buffer->wl_buffer = wl_shm_pool_create_buffer(
-        pool, 0, buffer->width, buffer->height,
-        buffer->width * 4, WL_SHM_FORMAT_ARGB8888);
-
-    close(fd);
-    wl_shm_pool_destroy(pool);
-
-    wl_buffer_add_listener(buffer->wl_buffer, &wl_buffer_listener, buffer);
-    wl_list_insert(&state->buffers, &buffer->link);
-
-    return buffer;
+void split_left(struct state *state) {
+    state->width *= 0.5;
+    update_pointer(state);
+    draw(state);
 }
 
-static void destroy_buffer(struct buffer *buffer) {
-    munmap(buffer->data, buffer->size);
-    wl_buffer_destroy(buffer->wl_buffer);
-    wl_list_remove(&buffer->link);
-    free(buffer);
+void split_right(struct state *state) {
+    state->width *= 0.5;
+    state->x += state->width;
+    update_pointer(state);
+    draw(state);
 }
 
-static struct buffer *get_buffer(struct state *state,
-    int width, int height)
-{
-    bool found = false;
-    struct buffer *buffer, *tmp;
-    wl_list_for_each_safe (buffer, tmp, &state->buffers, link) {
-        if (buffer->in_use)
-            continue;
-
-        if (buffer->width != width || buffer->height != height) {
-            destroy_buffer(buffer);
-            continue;
-        }
-
-        found = true;
-        break;
-    }
-
-    if (!found)
-        buffer = create_buffer(state, width, height);
-
-    buffer->in_use = true;
-    return buffer;
+void split_up(struct state *state) {
+    state->height *= 0.5;
+    update_pointer(state);
+    draw(state);
 }
 
-static void wl_registry_global(void *data, struct wl_registry *wl_registry,
-    uint32_t name, const char *interface, uint32_t version)
-{
-    struct global global = { .name = interface };
-
-    struct global *found = bsearch(&global, globals,
-        sizeof(globals) / sizeof(struct global),
-        sizeof(struct global), global_compare);
-
-    if (!found)
-        return;
-
-    struct wl_proxy **location =
-        (struct wl_proxy **)((uintptr_t)data + found->offset);
-
-    if (!found->is_singleton) {
-        if (found->callback) {
-            found->callback(data, location);
-        }
-        return;
-    }
-
-    if (!*location) {
-        *location = wl_registry_bind(
-            wl_registry, name, found->interface, found->version);
-    }
+void split_down(struct state *state) {
+    state->height *= 0.5;
+    state->y += state->height;
+    update_pointer(state);
+    draw(state);
 }
 
-static void wl_registry_global_remove(void *data,
-    struct wl_registry *wl_registry, uint32_t name)
-{
+void click(struct state *state) {
+    zwlr_virtual_pointer_v1_button(state->wlr_virtual_pointer, time_ms(), BTN_LEFT,
+        WL_POINTER_BUTTON_STATE_PRESSED);
+    zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
+    zwlr_virtual_pointer_v1_button(state->wlr_virtual_pointer, time_ms(), BTN_LEFT,
+        WL_POINTER_BUTTON_STATE_RELEASED);
+    zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
+    wl_display_flush(state->wl_display);
 }
 
-static const struct wl_registry_listener wl_registry_listener = {
-    .global = wl_registry_global,
-    .global_remove = wl_registry_global_remove,
-};
-
-static void draw(struct state *state, int width, int height);
-
-static void wlr_layer_surface_configure(void *data,
-    struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1, uint32_t serial,
-    uint32_t width, uint32_t height)
-{
-    struct state *state = data;
-    draw(state, width, height);
-    zwlr_layer_surface_v1_ack_configure(zwlr_layer_surface_v1, serial);
-    wl_surface_commit(state->wl_surface);
-}
-
-static void wlr_layer_surface_closed(void *data,
-    struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1)
-{
-    struct state *state = data;
+void quit(struct state *state) {
     state->running = false;
-}
-
-static const struct zwlr_layer_surface_v1_listener wlr_layer_surface_listener = {
-    .configure = wlr_layer_surface_configure,
-    .closed = wlr_layer_surface_closed,
-};
-
-static void draw_horizontal_line(struct buffer *buffer,
-    int x1, int x2, int y, int32_t color, int stroke)
-{
-    unsigned int *data = (unsigned int *)buffer->data;
-    for (int y_ = y; y_ < y + stroke; y_++) {
-        for (int x_ = x1; x_ < x2; x_++)
-            data[y_ * buffer->width + x_] = color;
-    }
-}
-
-static void draw_vertical_line(struct buffer *buffer,
-    int x, int y1, int y2, int32_t color, int stroke)
-{
-    unsigned int *data = (unsigned int *)buffer->data;
-    for (int x_ = x; x_ < x + stroke; x_++) {
-        for (int y_ = y1; y_ < y2; y_++)
-            data[y_ * buffer->width + x_] = color;
-    }
-}
-
-static void draw_box(struct buffer *buffer,
-    int x, int y, int width, int height,
-    int32_t color, int stroke)
-{
-    draw_horizontal_line(buffer, x, x + width - stroke, y, color, stroke);
-    draw_vertical_line(buffer, x, y, y + height - stroke, color, stroke);
-    draw_vertical_line(buffer, x + width - stroke, y, y + height - stroke, color, stroke);
-    draw_horizontal_line(buffer, x, x + width, y + height - stroke, color, stroke);
-}
-
-static void draw(struct state *state, int32_t width, int32_t height) {
-    struct buffer *buffer = get_buffer(state, width, height);
-    int32_t stride = width * 4;
-    for (int x = 0; x < state->grid_size; x++) {
-        for (int y = 0; y < state->grid_size; y++) {
-            int box_width = width / state->grid_size;
-            int box_height = height / state->grid_size;
-            draw_box(buffer,
-               x * box_width + state->gap_size,
-               y * box_height + state->gap_size,
-               box_width - state->gap_size * 2,
-               box_height - state->gap_size * 2,
-               0xffffffff, 1);
-        }
-    }
-    wl_surface_attach(state->wl_surface, buffer->wl_buffer, 0, 0);
-    wl_surface_damage_buffer(state->wl_surface, 0, 0, buffer->width, buffer->height);
 }
 
 int main(void) {
     struct state state = {
-        .running = true,
         .grid_size = 2,
-        .gap_size = 1,
+        .color0 = 0xff000000,
+        .color1 = 0xffffffff,
+        .x = 0.0,
+        .y = 0.0,
         .width = 1.0,
         .height = 1.0,
     };
 
     wl_list_init(&state.buffers);
+    wl_list_init(&state.seats);
+    wl_list_init(&state.outputs);
+
+    state.xkb_context = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
 
     state.wl_display = wl_display_connect(NULL);
     if (!state.wl_display) {
@@ -326,10 +102,9 @@ int main(void) {
         return EXIT_FAILURE;
     }
 
-    for (struct global *global = &globals[0];
-        global != &globals[sizeof(globals) / sizeof(struct global)];
-        global++)
-    {
+    for (size_t i = 0; i < globals_len; i++) {
+        const struct global *global = &globals[i];
+
         if (!global->is_singleton)
             continue;
 
@@ -343,6 +118,33 @@ int main(void) {
         }
     }
 
+    state.have_all_globals = true;
+
+    struct output *output;
+    wl_list_for_each (output, &state.outputs, link) {
+        output->xdg_output = zxdg_output_manager_v1_get_xdg_output(
+            state.xdg_output_manager, output->wl_output);
+        zxdg_output_v1_add_listener(output->xdg_output, &xdg_output_listener, output);
+    }
+
+    wl_display_roundtrip(state.wl_display);
+
+    static const char output_name[] = "DP-1";
+    bool found = false;
+    wl_list_for_each (output, &state.outputs, link) {
+        if (strcmp(output->name, output_name) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        fprintf(stderr, "output %s doesn't exist\n", output_name);
+        return EXIT_FAILURE;
+    }
+
+    state.output = output;
+
     state.wl_surface = wl_compositor_create_surface(state.wl_compositor);
 
     struct wl_region *region = wl_compositor_create_region(state.wl_compositor);
@@ -350,7 +152,7 @@ int main(void) {
     wl_region_destroy(region);
 
     state.wlr_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
-        state.wlr_layer_shell, state.wl_surface, NULL,
+        state.wlr_layer_shell, state.wl_surface, output->wl_output,
         ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "waypoint");
 
     zwlr_layer_surface_v1_set_size(state.wlr_layer_surface, 0, 0);
@@ -361,13 +163,18 @@ int main(void) {
         | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
     zwlr_layer_surface_v1_set_exclusive_zone(state.wlr_layer_surface, -1);
     zwlr_layer_surface_v1_set_keyboard_interactivity(
-        state.wlr_layer_surface, false);
+        state.wlr_layer_surface, true);
     zwlr_layer_surface_v1_add_listener(
         state.wlr_layer_surface, &wlr_layer_surface_listener, &state);
+
+    state.wlr_virtual_pointer =
+        zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
+            state.wlr_virtual_pointer_manager, NULL, output->wl_output);
 
     wl_surface_commit(state.wl_surface);
     wl_display_roundtrip(state.wl_display);
 
-    while (state.running && wl_display_dispatch(state.wl_display) != -1)
-        ;
+    state.running = true;
+    while (state.running && wl_display_dispatch(state.wl_display) != -1) {
+    }
 }
