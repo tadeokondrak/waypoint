@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <assert.h>
 
 #include <unistd.h>
 #include <sys/mman.h>
@@ -9,7 +10,13 @@
 #include <wayland-client.h>
 
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
+#include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
+
+struct region {
+    int x, y;
+    int width, height;
+};
 
 struct state {
     bool running;
@@ -20,18 +27,28 @@ struct state {
     struct wl_shm *wl_shm;
     struct wl_compositor *wl_compositor;
     struct zwlr_layer_shell_v1 *wlr_layer_shell;
+    struct zwlr_virtual_pointer_manager_v1 *wlr_virtual_pointer_manager;
 
     struct wl_surface *wl_surface;
     struct zwlr_layer_surface_v1 *wlr_layer_surface;
 
     struct wl_list buffers;
+
+    int grid_size;
+    int gap_size;
+    double x, y;
+    double width, height;
 };
 
 struct global {
+    const struct wl_interface *interface;
     const char *name;
     int version;
-    size_t offset;
-    const struct wl_interface *interface;
+    bool is_singleton;
+    union {
+        size_t offset;
+        void (*callback)(struct state *state, void *data);
+    };
 };
 
 static int global_compare(const void *a, const void *b) {
@@ -44,22 +61,46 @@ static int global_compare(const void *a, const void *b) {
 struct global globals[] = {
     /* must stay sorted */
     {
-        "wl_compositor",
-        4,
-        offsetof(struct state, wl_compositor),
-        &wl_compositor_interface,
+        .interface = &wl_compositor_interface,
+        .name = "wl_compositor",
+        .version = 4,
+        .is_singleton = true,
+        .offset = offsetof(struct state, wl_compositor),
     },
     {
-        "wl_shm",
-        1,
-        offsetof(struct state, wl_shm),
-        &wl_shm_interface,
+        .interface = &wl_output_interface,
+        .name = "wl_output",
+        .version = 3,
+        .is_singleton = false,
+        .callback = NULL,
     },
     {
-        "zwlr_layer_shell_v1",
-        2,
-        offsetof(struct state, wlr_layer_shell),
-        &zwlr_layer_shell_v1_interface,
+        .interface = &wl_keyboard_interface,
+        .name = "wl_keyboard",
+        .version = 7,
+        .is_singleton = false,
+        .callback = NULL,
+    },
+    {
+        .interface = &wl_shm_interface,
+        .name = "wl_shm",
+        .version = 1,
+        .is_singleton = true,
+        .offset = offsetof(struct state, wl_shm),
+    },
+    {
+        .interface = &zwlr_layer_shell_v1_interface,
+        .name = "zwlr_layer_shell_v1",
+        .version = 2,
+        .is_singleton = true,
+        .offset = offsetof(struct state, wlr_layer_shell),
+    },
+    {
+        .interface = &zwlr_virtual_pointer_manager_v1_interface,
+        .name = "zwlr_virtual_pointer_manager_v1",
+        .version = 2,
+        .is_singleton = true,
+        .offset = offsetof(struct state, wlr_virtual_pointer_manager),
     },
 };
 
@@ -68,7 +109,7 @@ struct buffer {
     struct wl_list link;
 
     struct wl_buffer *wl_buffer;
-    int32_t width, height;
+    int width, height;
 
     unsigned char *data;
     size_t size;
@@ -86,7 +127,7 @@ static const struct wl_buffer_listener wl_buffer_listener = {
 };
 
 static struct buffer *create_buffer(struct state *state,
-    int32_t width, int32_t height)
+    int width, int height)
 {
     struct buffer *buffer = malloc(sizeof(struct buffer));
 
@@ -95,7 +136,7 @@ static struct buffer *create_buffer(struct state *state,
     buffer->size = buffer->width * 4 * buffer->height;
     buffer->in_use = true;
 
-    int fd = memfd_create("wkeynav", MFD_CLOEXEC);
+    int fd = memfd_create("waypoint", MFD_CLOEXEC);
     int rc = ftruncate(fd, buffer->size); (void)rc;
 
     buffer->data =
@@ -125,7 +166,7 @@ static void destroy_buffer(struct buffer *buffer) {
 }
 
 static struct buffer *get_buffer(struct state *state,
-    int32_t width, int32_t height)
+    int width, int height)
 {
     bool found = false;
     struct buffer *buffer, *tmp;
@@ -152,7 +193,7 @@ static struct buffer *get_buffer(struct state *state,
 static void wl_registry_global(void *data, struct wl_registry *wl_registry,
     uint32_t name, const char *interface, uint32_t version)
 {
-    struct global global = { interface, 0, 0, NULL };
+    struct global global = { .name = interface };
 
     struct global *found = bsearch(&global, globals,
         sizeof(globals) / sizeof(struct global),
@@ -163,6 +204,13 @@ static void wl_registry_global(void *data, struct wl_registry *wl_registry,
 
     struct wl_proxy **location =
         (struct wl_proxy **)((uintptr_t)data + found->offset);
+
+    if (!found->is_singleton) {
+        if (found->callback) {
+            found->callback(data, location);
+        }
+        return;
+    }
 
     if (!*location) {
         *location = wl_registry_bind(
@@ -180,7 +228,7 @@ static const struct wl_registry_listener wl_registry_listener = {
     .global_remove = wl_registry_global_remove,
 };
 
-static void draw(struct state *state, int32_t width, int32_t height);
+static void draw(struct state *state, int width, int height);
 
 static void wlr_layer_surface_configure(void *data,
     struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1, uint32_t serial,
@@ -204,15 +252,64 @@ static const struct zwlr_layer_surface_v1_listener wlr_layer_surface_listener = 
     .closed = wlr_layer_surface_closed,
 };
 
+static void draw_horizontal_line(struct buffer *buffer,
+    int x1, int x2, int y, int32_t color, int stroke)
+{
+    unsigned int *data = (unsigned int *)buffer->data;
+    for (int y_ = y; y_ < y + stroke; y_++) {
+        for (int x_ = x1; x_ < x2; x_++)
+            data[y_ * buffer->width + x_] = color;
+    }
+}
+
+static void draw_vertical_line(struct buffer *buffer,
+    int x, int y1, int y2, int32_t color, int stroke)
+{
+    unsigned int *data = (unsigned int *)buffer->data;
+    for (int x_ = x; x_ < x + stroke; x_++) {
+        for (int y_ = y1; y_ < y2; y_++)
+            data[y_ * buffer->width + x_] = color;
+    }
+}
+
+static void draw_box(struct buffer *buffer,
+    int x, int y, int width, int height,
+    int32_t color, int stroke)
+{
+    draw_horizontal_line(buffer, x, x + width - stroke, y, color, stroke);
+    draw_vertical_line(buffer, x, y, y + height - stroke, color, stroke);
+    draw_vertical_line(buffer, x + width - stroke, y, y + height - stroke, color, stroke);
+    draw_horizontal_line(buffer, x, x + width, y + height - stroke, color, stroke);
+}
+
 static void draw(struct state *state, int32_t width, int32_t height) {
     struct buffer *buffer = get_buffer(state, width, height);
-    memset(buffer->data, 0x5F, buffer->size);
+    int32_t stride = width * 4;
+    for (int x = 0; x < state->grid_size; x++) {
+        for (int y = 0; y < state->grid_size; y++) {
+            int box_width = width / state->grid_size;
+            int box_height = height / state->grid_size;
+            draw_box(buffer,
+               x * box_width + state->gap_size,
+               y * box_height + state->gap_size,
+               box_width - state->gap_size * 2,
+               box_height - state->gap_size * 2,
+               0xffffffff, 1);
+        }
+    }
     wl_surface_attach(state->wl_surface, buffer->wl_buffer, 0, 0);
     wl_surface_damage_buffer(state->wl_surface, 0, 0, buffer->width, buffer->height);
 }
 
 int main(void) {
-    struct state state = {.running = true};
+    struct state state = {
+        .running = true,
+        .grid_size = 2,
+        .gap_size = 1,
+        .width = 1.0,
+        .height = 1.0,
+    };
+
     wl_list_init(&state.buffers);
 
     state.wl_display = wl_display_connect(NULL);
@@ -233,6 +330,9 @@ int main(void) {
         global != &globals[sizeof(globals) / sizeof(struct global)];
         global++)
     {
+        if (!global->is_singleton)
+            continue;
+
         struct wl_proxy **location =
             (struct wl_proxy **)((uintptr_t)&state + global->offset);
 
@@ -251,14 +351,17 @@ int main(void) {
 
     state.wlr_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
         state.wlr_layer_shell, state.wl_surface, NULL,
-        ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "wkeynav");
+        ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "waypoint");
 
     zwlr_layer_surface_v1_set_size(state.wlr_layer_surface, 0, 0);
     zwlr_layer_surface_v1_set_anchor(state.wlr_layer_surface,
-        ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM
-        | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+        ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP
+        | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM
+        | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT
+        | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
     zwlr_layer_surface_v1_set_exclusive_zone(state.wlr_layer_surface, -1);
-    zwlr_layer_surface_v1_set_keyboard_interactivity(state.wlr_layer_surface, false);
+    zwlr_layer_surface_v1_set_keyboard_interactivity(
+        state.wlr_layer_surface, false);
     zwlr_layer_surface_v1_add_listener(
         state.wlr_layer_surface, &wlr_layer_surface_listener, &state);
 

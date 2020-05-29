@@ -1,5 +1,5 @@
 project(
-    'wkeynav',
+    'waypoint',
     'c',
     default_options: [
         'c_std=c11',
@@ -22,8 +22,8 @@ xkbcommon_dep = dependency('xkbcommon')
 subdir('protocol')
 subdir('src')
 
-wkeynav_bin = executable(
-    'wkeynav',
+waypoint_bin = executable(
+    'waypoint',
     src,
     include_directories: [inc],
     dependencies: [
