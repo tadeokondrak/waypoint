@@ -137,16 +137,16 @@ static void wl_keyboard_key(void *data, struct wl_keyboard *wl_keyboard,
     case XKB_KEY_Escape:
         seat->state->running = false;
         break;
-    case XKB_KEY_n:
+    case XKB_KEY_h:
         split_left(seat->state);
         break;
-    case XKB_KEY_e:
+    case XKB_KEY_j:
         split_down(seat->state);
         break;
-    case XKB_KEY_i:
+    case XKB_KEY_k:
         split_up(seat->state);
         break;
-    case XKB_KEY_o:
+    case XKB_KEY_l:
         split_right(seat->state);
         break;
     case XKB_KEY_Return:
