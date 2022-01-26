@@ -23,13 +23,4 @@ wayland_protocols_dep = dependency('wayland-protocols')
 xkbcommon_dep = dependency('xkbcommon')
 
 subdir('protocol')
-
-waypoint_bin = executable(
-    'waypoint',
-    'waypoint.c',
-    dependencies: [
-        wayland_client_dep,
-        xkbcommon_dep,
-        protocols_dep,
-    ],
-)
+subdir('src')
