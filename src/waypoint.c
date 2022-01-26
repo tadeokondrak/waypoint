@@ -1,3 +1,5 @@
+#include "waypoint.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,85 +17,6 @@
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
-
-struct waypoint_state {
-    bool running;
-    bool have_all_globals;
-
-    struct xkb_context *xkb_context;
-
-    struct wl_display *wl_display;
-    struct wl_registry *wl_registry;
-
-    struct wl_shm *wl_shm;
-    struct wl_compositor *wl_compositor;
-    struct zwlr_layer_shell_v1 *wlr_layer_shell;
-    struct zwlr_virtual_pointer_manager_v1 *wlr_virtual_pointer_manager;
-    struct zxdg_output_manager_v1 *xdg_output_manager;
-
-    struct wl_surface *wl_surface;
-    struct zwlr_layer_surface_v1 *wlr_layer_surface;
-
-    struct zwlr_virtual_pointer_v1 *wlr_virtual_pointer;
-
-    struct wl_list buffers;
-    struct wl_list seats;
-    struct wl_list outputs;
-
-    struct waypoint_output *output;
-
-    int surface_width, surface_height;
-
-    int grid_size;
-    int32_t color0;
-    int32_t color1;
-
-    double x, y;
-    double width, height;
-};
-
-struct waypoint_global {
-    const struct wl_interface *interface;
-    const char *name;
-    int version;
-    bool is_singleton;
-    union {
-        size_t offset;
-        void (*callback)(struct waypoint_state *state, void *data);
-    };
-};
-
-struct waypoint_seat {
-    struct wl_list link;
-    struct waypoint_state *state;
-    struct wl_seat *wl_seat;
-    struct wl_pointer *wl_pointer;
-    struct wl_keyboard *wl_keyboard;
-    struct xkb_state *xkb_state;
-    struct xkb_keymap *xkb_keymap;
-    char *name;
-    uint32_t mods;
-};
-
-struct waypoint_output {
-    struct wl_list link;
-    struct waypoint_state *state;
-    struct wl_output *wl_output;
-    struct zxdg_output_v1 *xdg_output;
-    char *name;
-    int scale_factor;
-    int width, height;
-};
-
-struct waypoint_buffer {
-    struct wl_list link;
-    struct waypoint_state *state;
-    struct wl_buffer *wl_buffer;
-    int width, height;
-    unsigned char *data;
-    size_t size;
-    bool in_use;
-};
 
 static void draw(struct waypoint_state *state);
 
@@ -675,7 +598,7 @@ int main(void) {
     wl_display_roundtrip(state.wl_display);
 
     static const char output_name[] = "DP-1";
-    
+
     bool found = false;
     wl_list_for_each (output, &state.outputs, link) {
         if (true || strcmp(output->name, output_name) == 0) {
@@ -692,12 +615,12 @@ int main(void) {
     state.output = output;
 
     state.wl_surface = wl_compositor_create_surface(state.wl_compositor);
-    
+
     struct wl_region *region = wl_compositor_create_region(state.wl_compositor);
     wl_surface_set_input_region(state.wl_surface, region);
     wl_region_destroy(region);
     wl_surface_commit(state.wl_surface);
-    
+
     state.wlr_layer_surface = zwlr_layer_shell_v1_get_layer_surface(
         state.wlr_layer_shell, state.wl_surface, output->wl_output,
         ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, "waypoint");
