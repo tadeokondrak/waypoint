@@ -424,24 +424,13 @@ static const struct zwlr_layer_surface_v1_listener wlr_layer_surface_listener = 
     .closed = wlr_layer_surface_closed,
 };
 
-static void draw_box(struct waypoint_buffer *buffer,
-    int x, int y, int width, int height, int32_t color)
-{
-    unsigned int *data = (unsigned int *)buffer->data;
-    for (int y_ = y; y_ < y + height; y_++) {
-        for (int x_ = x; x_ < x + width; x_++) {
-            data[y_ * buffer->width + x_] = color;
-        }
-    }
-}
-
 static void draw_outline(struct waypoint_buffer *buffer,
     int x, int y, int width, int height, int32_t color, int stroke)
 {
-    draw_box(buffer, x, y, width, stroke, color);
-    draw_box(buffer, x, y, stroke, height, color);
-    draw_box(buffer, x, y + height - stroke, width, stroke, color);
-    draw_box(buffer, x + width - stroke, y, stroke, height, color);
+    cairo_set_line_width(buffer->cairo, 1.0);
+    cairo_set_source_rgba(buffer->cairo, 1.0, 1.0, 1.0, 1.0);
+    cairo_rectangle(buffer->cairo, x, y, width, height);
+    cairo_stroke(buffer->cairo);
 }
 
 static void draw(struct waypoint_state *state) {
