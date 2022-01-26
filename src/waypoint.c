@@ -1,3 +1,4 @@
+#include "buffer.h"
 #include "waypoint.h"
 
 #include <stdlib.h>
@@ -306,77 +307,6 @@ static void wl_seat_global(struct waypoint_state *state, void *bound) {
     wl_list_insert(&state->seats, &seat->link);
 }
 
-static void wl_buffer_release(void *data, struct wl_buffer *wl_buffer) {
-    struct waypoint_buffer *buffer = data;
-    buffer->in_use = false;
-}
-
-static const struct wl_buffer_listener wl_buffer_listener = {
-    .release = wl_buffer_release,
-};
-
-static struct waypoint_buffer *create_buffer(struct waypoint_state *state,
-    int width, int height)
-{
-    struct waypoint_buffer *buffer = malloc(sizeof(struct waypoint_buffer));
-
-    buffer->width = width;
-    buffer->height = height;
-    buffer->size = buffer->width * 4 * buffer->height;
-    buffer->in_use = true;
-
-    int fd = memfd_create("waypoint", MFD_CLOEXEC);
-    int rc = ftruncate(fd, buffer->size); (void)rc;
-
-    buffer->data =
-        mmap(NULL, buffer->size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-    struct wl_shm_pool *pool =
-        wl_shm_create_pool(state->wl_shm, fd, buffer->size);
-
-    buffer->wl_buffer = wl_shm_pool_create_buffer(
-        pool, 0, buffer->width, buffer->height,
-        buffer->width * 4, WL_SHM_FORMAT_ARGB8888);
-
-    close(fd);
-    wl_shm_pool_destroy(pool);
-
-    wl_buffer_add_listener(buffer->wl_buffer, &wl_buffer_listener, buffer);
-    wl_list_insert(&state->buffers, &buffer->link);
-
-    return buffer;
-}
-
-static void destroy_buffer(struct waypoint_buffer *buffer) {
-    munmap(buffer->data, buffer->size);
-    wl_buffer_destroy(buffer->wl_buffer);
-    wl_list_remove(&buffer->link);
-    free(buffer);
-}
-
-static struct waypoint_buffer *get_buffer(struct waypoint_state *state, int width, int height) {
-    bool found = false;
-    struct waypoint_buffer *buffer, *tmp;
-    wl_list_for_each_safe (buffer, tmp, &state->buffers, link) {
-        if (buffer->in_use)
-            continue;
-
-        if (buffer->width != width || buffer->height != height) {
-            destroy_buffer(buffer);
-            continue;
-        }
-
-        found = true;
-        break;
-    }
-
-    if (!found)
-        buffer = create_buffer(state, width, height);
-
-    buffer->in_use = true;
-    return buffer;
-}
-
 static const struct waypoint_global globals[] = {
     /* must stay sorted */
     {
@@ -518,7 +448,8 @@ static void draw(struct waypoint_state *state) {
     int factor = state->output->scale_factor;
     int width = state->surface_width * factor;
     int height = state->surface_height * factor;
-    struct waypoint_buffer *buffer = get_buffer(state, width, height);
+    struct waypoint_buffer *buffer =
+        waypoint_buffer_get(state->wl_shm, &state->buffers, width, height);
     memset(buffer->data, 0, buffer->size);
     for (int x = 0; x < state->grid_size; x++) {
         for (int y = 0; y < state->grid_size; y++) {

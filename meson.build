@@ -21,6 +21,7 @@ rt_dep = cc.find_library('rt')
 wayland_client_dep = dependency('wayland-client')
 wayland_protocols_dep = dependency('wayland-protocols')
 xkbcommon_dep = dependency('xkbcommon')
+cairo_dep = dependency('cairo')
 
 waypoint_src = []
 waypoint_inc = []

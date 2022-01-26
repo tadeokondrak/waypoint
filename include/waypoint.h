@@ -74,14 +74,3 @@ struct waypoint_output {
     int scale_factor;
     int width, height;
 };
-
-struct waypoint_buffer {
-    struct wl_list link;
-    struct waypoint_state *state;
-    struct wl_buffer *wl_buffer;
-    int width, height;
-    unsigned char *data;
-    size_t size;
-    bool in_use;
-};
-
