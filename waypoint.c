@@ -16,7 +16,7 @@
 #include "xdg-output-unstable-v1-client-protocol.h"
 #include "xdg-shell-client-protocol.h"
 
-struct state {
+struct waypoint_state {
     bool running;
     bool have_all_globals;
 
@@ -40,7 +40,7 @@ struct state {
     struct wl_list seats;
     struct wl_list outputs;
 
-    struct output *output;
+    struct waypoint_output *output;
 
     int surface_width, surface_height;
 
@@ -52,20 +52,20 @@ struct state {
     double width, height;
 };
 
-struct global {
+struct waypoint_global {
     const struct wl_interface *interface;
     const char *name;
     int version;
     bool is_singleton;
     union {
         size_t offset;
-        void (*callback)(struct state *state, void *data);
+        void (*callback)(struct waypoint_state *state, void *data);
     };
 };
 
-struct seat {
+struct waypoint_seat {
     struct wl_list link;
-    struct state *state;
+    struct waypoint_state *state;
     struct wl_seat *wl_seat;
     struct wl_pointer *wl_pointer;
     struct wl_keyboard *wl_keyboard;
@@ -75,9 +75,9 @@ struct seat {
     uint32_t mods;
 };
 
-struct output {
+struct waypoint_output {
     struct wl_list link;
-    struct state *state;
+    struct waypoint_state *state;
     struct wl_output *wl_output;
     struct zxdg_output_v1 *xdg_output;
     char *name;
@@ -85,9 +85,9 @@ struct output {
     int width, height;
 };
 
-struct buffer {
+struct waypoint_buffer {
     struct wl_list link;
-    struct state *state;
+    struct waypoint_state *state;
     struct wl_buffer *wl_buffer;
     int width, height;
     unsigned char *data;
@@ -95,7 +95,7 @@ struct buffer {
     bool in_use;
 };
 
-static void draw(struct state *state);
+static void draw(struct waypoint_state *state);
 
 static uint32_t time_ms(void) {
     struct timespec now;
@@ -103,7 +103,7 @@ static uint32_t time_ms(void) {
     return now.tv_nsec / 1000;
 }
 
-static void update_pointer(struct state *state) {
+static void update_pointer(struct waypoint_state *state) {
     zwlr_virtual_pointer_v1_motion_absolute(
         state->wlr_virtual_pointer, time_ms(),
         (state->output->width * state->x) + (state->output->width * state->width / 2),
@@ -112,57 +112,57 @@ static void update_pointer(struct state *state) {
     zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
 }
 
-static void cut_left(struct state *state, double value) {
+static void cut_left(struct waypoint_state *state, double value) {
     state->width *= value;
     update_pointer(state);
     draw(state);
 }
 
-static void cut_right(struct state *state, double value) {
+static void cut_right(struct waypoint_state *state, double value) {
     state->x += state->width * (1.0 - value);
     state->width *= value;
     update_pointer(state);
     draw(state);
 }
 
-static void cut_up(struct state *state, double value) {
+static void cut_up(struct waypoint_state *state, double value) {
     state->height *= value;
     update_pointer(state);
     draw(state);
 }
 
-static void cut_down(struct state *state, double value) {
+static void cut_down(struct waypoint_state *state, double value) {
     state->y += state->height * (1.0 - value);
     state->height *= value;
     update_pointer(state);
     draw(state);
 }
 
-static void move_left(struct state *state, double value) {
+static void move_left(struct waypoint_state *state, double value) {
     state->x -= state->width * value;
     update_pointer(state);
     draw(state);
 }
 
-static void move_right(struct state *state, double value) {
+static void move_right(struct waypoint_state *state, double value) {
     state->x += state->width * value;
     update_pointer(state);
     draw(state);
 }
 
-static void move_up(struct state *state, double value) {
+static void move_up(struct waypoint_state *state, double value) {
     state->y -= state->height * value;
     update_pointer(state);
     draw(state);
 }
 
-static void move_down(struct state *state, double value) {
+static void move_down(struct waypoint_state *state, double value) {
     state->y += state->height * value;
     update_pointer(state);
     draw(state);
 }
 
-static void click(struct state *state) {
+static void click(struct waypoint_state *state) {
     zwlr_virtual_pointer_v1_button(state->wlr_virtual_pointer, time_ms(), BTN_LEFT,
         WL_POINTER_BUTTON_STATE_PRESSED);
     zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
@@ -171,15 +171,15 @@ static void click(struct state *state) {
     zwlr_virtual_pointer_v1_frame(state->wlr_virtual_pointer);
 }
 
-static void quit(struct state *state) {
+static void quit(struct waypoint_state *state) {
     wl_display_flush(state->wl_display);
     state->running = false;
 }
 
 static int global_compare(const void *a, const void *b) {
     return strcmp(
-        ((const struct global *)a)->name,
-        ((const struct global *)b)->name);
+        ((const struct waypoint_global *)a)->name,
+        ((const struct waypoint_global *)b)->name);
 }
 
 static void wl_output_geometry(void *data, struct wl_output *wl_output,
@@ -199,7 +199,7 @@ static void wl_output_done(void *data, struct wl_output *wl_output) {
 static void wl_output_scale(void *data, struct wl_output *wl_output,
     int32_t factor)
 {
-    struct output *output = data;
+    struct waypoint_output *output = data;
     output->scale_factor = factor;
 }
 
@@ -218,7 +218,7 @@ static void xdg_output_logical_position(void *data,
 static void xdg_output_logical_size(void *data,
     struct zxdg_output_v1 *zxdg_output_v1, int32_t width, int32_t height)
 {
-    struct output *output = data;
+    struct waypoint_output *output = data;
     output->width = width;
     output->height = height;
 }
@@ -229,7 +229,7 @@ static void xdg_output_done(void *data, struct zxdg_output_v1 *zxdg_output_v1) {
 static void xdg_output_name(void *data, struct zxdg_output_v1 *zxdg_output_v1,
     const char *name)
 {
-    struct output *output = data;
+    struct waypoint_output *output = data;
     free(output->name);
     output->name = strdup(name);
 }
@@ -247,9 +247,9 @@ static const struct zxdg_output_v1_listener xdg_output_listener = {
     .description = xdg_output_description,
 };
 
-static void wl_output_global(struct state *state, void *bound) {
-    struct output *output = malloc(sizeof(struct output));
-    *output = (struct output) {
+static void wl_output_global(struct waypoint_state *state, void *bound) {
+    struct waypoint_output *output = malloc(sizeof(struct waypoint_output));
+    *output = (struct waypoint_output) {
         .state = state,
         .wl_output = bound,
     };
@@ -266,7 +266,7 @@ static void wl_output_global(struct state *state, void *bound) {
 static void wl_keyboard_keymap(void *data, struct wl_keyboard *wl_keyboard,
     uint32_t format, int32_t fd, uint32_t size)
 {
-    struct seat *seat = data;
+    struct waypoint_seat *seat = data;
     xkb_keymap_unref(seat->xkb_keymap);
     xkb_state_unref(seat->xkb_state);
     char *map_shm = mmap(NULL, size, PROT_READ, MAP_PRIVATE, fd, 0);
@@ -292,7 +292,7 @@ static void wl_keyboard_key(void *data, struct wl_keyboard *wl_keyboard,
 {
     if (state != WL_KEYBOARD_KEY_STATE_PRESSED)
         return;
-    struct seat *seat = data;
+    struct waypoint_seat *seat = data;
     xkb_keysym_t keysym = xkb_state_key_get_one_sym(seat->xkb_state, key + 8);
     switch (keysym) {
     case XKB_KEY_Escape:
@@ -334,7 +334,7 @@ static void wl_keyboard_modifiers(void *data, struct wl_keyboard *wl_keyboard,
     uint32_t serial, uint32_t mods_depressed, uint32_t mods_latched,
     uint32_t mods_locked, uint32_t group)
 {
-    struct seat *seat = data;
+    struct waypoint_seat *seat = data;
     xkb_state_update_mask(seat->xkb_state,
         mods_depressed, mods_latched, mods_locked, 0, 0, group);
 }
@@ -356,7 +356,7 @@ static const struct wl_keyboard_listener wl_keyboard_listener = {
 static void wl_seat_capabilities(void *data, struct wl_seat *wl_seat,
     uint32_t capabilities)
 {
-    struct seat *seat = data;
+    struct waypoint_seat *seat = data;
     if ((capabilities & WL_SEAT_CAPABILITY_KEYBOARD)
         && seat->wl_keyboard == NULL)
     {
@@ -373,9 +373,9 @@ static const struct wl_seat_listener wl_seat_listener = {
     .name = wl_seat_name,
 };
 
-static void wl_seat_global(struct state *state, void *bound) {
-    struct seat *seat = malloc(sizeof(struct seat));
-    *seat = (struct seat) {
+static void wl_seat_global(struct waypoint_state *state, void *bound) {
+    struct waypoint_seat *seat = malloc(sizeof(struct waypoint_seat));
+    *seat = (struct waypoint_seat) {
         .state = state,
         .wl_seat = bound,
     };
@@ -384,7 +384,7 @@ static void wl_seat_global(struct state *state, void *bound) {
 }
 
 static void wl_buffer_release(void *data, struct wl_buffer *wl_buffer) {
-    struct buffer *buffer = data;
+    struct waypoint_buffer *buffer = data;
     buffer->in_use = false;
 }
 
@@ -392,10 +392,10 @@ static const struct wl_buffer_listener wl_buffer_listener = {
     .release = wl_buffer_release,
 };
 
-static struct buffer *create_buffer(struct state *state,
+static struct waypoint_buffer *create_buffer(struct waypoint_state *state,
     int width, int height)
 {
-    struct buffer *buffer = malloc(sizeof(struct buffer));
+    struct waypoint_buffer *buffer = malloc(sizeof(struct waypoint_buffer));
 
     buffer->width = width;
     buffer->height = height;
@@ -424,16 +424,16 @@ static struct buffer *create_buffer(struct state *state,
     return buffer;
 }
 
-static void destroy_buffer(struct buffer *buffer) {
+static void destroy_buffer(struct waypoint_buffer *buffer) {
     munmap(buffer->data, buffer->size);
     wl_buffer_destroy(buffer->wl_buffer);
     wl_list_remove(&buffer->link);
     free(buffer);
 }
 
-static struct buffer *get_buffer(struct state *state, int width, int height) {
+static struct waypoint_buffer *get_buffer(struct waypoint_state *state, int width, int height) {
     bool found = false;
-    struct buffer *buffer, *tmp;
+    struct waypoint_buffer *buffer, *tmp;
     wl_list_for_each_safe (buffer, tmp, &state->buffers, link) {
         if (buffer->in_use)
             continue;
@@ -454,14 +454,14 @@ static struct buffer *get_buffer(struct state *state, int width, int height) {
     return buffer;
 }
 
-static const struct global globals[] = {
+static const struct waypoint_global globals[] = {
     /* must stay sorted */
     {
         .interface = &wl_compositor_interface,
         .name = "wl_compositor",
         .version = 4,
         .is_singleton = true,
-        .offset = offsetof(struct state, wl_compositor),
+        .offset = offsetof(struct waypoint_state, wl_compositor),
     },
     {
         .interface = &wl_output_interface,
@@ -482,39 +482,39 @@ static const struct global globals[] = {
         .name = "wl_shm",
         .version = 1,
         .is_singleton = true,
-        .offset = offsetof(struct state, wl_shm),
+        .offset = offsetof(struct waypoint_state, wl_shm),
     },
     {
         .interface = &zwlr_layer_shell_v1_interface,
         .name = "zwlr_layer_shell_v1",
         .version = 2,
         .is_singleton = true,
-        .offset = offsetof(struct state, wlr_layer_shell),
+        .offset = offsetof(struct waypoint_state, wlr_layer_shell),
     },
     {
         .interface = &zwlr_virtual_pointer_manager_v1_interface,
         .name = "zwlr_virtual_pointer_manager_v1",
         .version = 2,
         .is_singleton = true,
-        .offset = offsetof(struct state, wlr_virtual_pointer_manager),
+        .offset = offsetof(struct waypoint_state, wlr_virtual_pointer_manager),
     },
     {
         .interface = &zxdg_output_manager_v1_interface,
         .name = "zxdg_output_manager_v1",
         .version = 3,
         .is_singleton = true,
-        .offset = offsetof(struct state, xdg_output_manager),
+        .offset = offsetof(struct waypoint_state, xdg_output_manager),
     },
 };
 
 static void wl_registry_global(void *data, struct wl_registry *wl_registry,
     uint32_t name, const char *interface, uint32_t version)
 {
-    struct global global = { .name = interface };
+    struct waypoint_global global = { .name = interface };
 
-    struct global *found = bsearch(&global, globals,
-        sizeof(globals) / sizeof(struct global),
-        sizeof(struct global), global_compare);
+    struct waypoint_global *found = bsearch(&global, globals,
+        sizeof(globals) / sizeof(struct waypoint_global),
+        sizeof(struct waypoint_global), global_compare);
 
     if (!found)
         return;
@@ -551,7 +551,7 @@ static void wlr_layer_surface_configure(void *data,
     struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1,
     uint32_t serial, uint32_t width, uint32_t height)
 {
-    struct state *state = data;
+    struct waypoint_state *state = data;
     state->surface_width = width;
     state->surface_height = height;
     zwlr_layer_surface_v1_ack_configure(zwlr_layer_surface_v1, serial);
@@ -562,7 +562,7 @@ static void wlr_layer_surface_configure(void *data,
 static void wlr_layer_surface_closed(void *data,
     struct zwlr_layer_surface_v1 *zwlr_layer_surface_v1)
 {
-    struct state *state = data;
+    struct waypoint_state *state = data;
     state->running = false;
 }
 
@@ -571,7 +571,7 @@ static const struct zwlr_layer_surface_v1_listener wlr_layer_surface_listener = 
     .closed = wlr_layer_surface_closed,
 };
 
-static void draw_box(struct buffer *buffer,
+static void draw_box(struct waypoint_buffer *buffer,
     int x, int y, int width, int height, int32_t color)
 {
     unsigned int *data = (unsigned int *)buffer->data;
@@ -582,7 +582,7 @@ static void draw_box(struct buffer *buffer,
     }
 }
 
-static void draw_outline(struct buffer *buffer,
+static void draw_outline(struct waypoint_buffer *buffer,
     int x, int y, int width, int height, int32_t color, int stroke)
 {
     draw_box(buffer, x, y, width, stroke, color);
@@ -591,11 +591,11 @@ static void draw_outline(struct buffer *buffer,
     draw_box(buffer, x + width - stroke, y, stroke, height, color);
 }
 
-static void draw(struct state *state) {
+static void draw(struct waypoint_state *state) {
     int factor = state->output->scale_factor;
     int width = state->surface_width * factor;
     int height = state->surface_height * factor;
-    struct buffer *buffer = get_buffer(state, width, height);
+    struct waypoint_buffer *buffer = get_buffer(state, width, height);
     memset(buffer->data, 0, buffer->size);
     for (int x = 0; x < state->grid_size; x++) {
         for (int y = 0; y < state->grid_size; y++) {
@@ -617,7 +617,7 @@ static void draw(struct state *state) {
 }
 
 int main(void) {
-    struct state state = {
+    struct waypoint_state state = {
         .grid_size = 2,
         .color0 = 0xff000000,
         .color1 = 0xffffffff,
@@ -648,7 +648,7 @@ int main(void) {
     }
 
     for (size_t i = 0; i < sizeof(globals) / sizeof(globals[0]); i++) {
-        const struct global *global = &globals[i];
+        const struct waypoint_global *global = &globals[i];
 
         if (!global->is_singleton)
             continue;
@@ -665,7 +665,7 @@ int main(void) {
 
     state.have_all_globals = true;
 
-    struct output *output;
+    struct waypoint_output *output;
     wl_list_for_each (output, &state.outputs, link) {
         output->xdg_output = zxdg_output_manager_v1_get_xdg_output(
             state.xdg_output_manager, output->wl_output);
