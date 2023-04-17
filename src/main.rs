@@ -1,16 +1,13 @@
 use anyhow::{Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
-use nix::{
-    sys::time::TimeValLike,
-    time::{clock_gettime, ClockId},
-};
+
 use std::{
     cell::OnceCell,
     io::Write,
     os::fd::{AsRawFd, IntoRawFd},
 };
-use tiny_skia::{Color, Paint, Path, PathBuilder, Rect, Shader, Stroke, Transform};
+use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
 use wayland_client::{
     globals::{registry_queue_init, Global, GlobalListContents},
     protocol::{
@@ -42,7 +39,7 @@ use xkbcommon::xkb;
 
 struct App {
     will_quit: bool,
-    conn: Connection,
+    _conn: Connection,
     globals: Globals,
     seats: TypedHandleMap<Seat>,
     outputs: TypedHandleMap<Output>,
@@ -611,7 +608,7 @@ fn main() -> Result<()> {
     let qhandle = queue.handle();
     let mut app = App {
         will_quit: false,
-        conn: conn,
+        _conn: conn,
         globals: Globals {
             wl_shm: global_list
                 .bind::<WlShm, App, ()>(&qhandle, 1..=1, ())
