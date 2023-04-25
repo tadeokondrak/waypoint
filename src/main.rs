@@ -1,7 +1,6 @@
 use anyhow::{Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
-
 use std::{
     cell::OnceCell,
     io::Write,
@@ -46,6 +45,11 @@ struct App {
     surfaces: TypedHandleMap<Surface>,
     buffers: TypedHandleMap<Buffer>,
 }
+
+type SeatId = TypedHandle<Seat>;
+type OutputId = TypedHandle<Output>;
+type SurfaceId = TypedHandle<Surface>;
+type BufferId = TypedHandle<Buffer>;
 
 struct Globals {
     wl_shm: WlShm,
@@ -151,12 +155,12 @@ impl Dispatch<WlRegistry, GlobalListContents> for App {
     }
 }
 
-impl Dispatch<WlSeat, TypedHandle<Seat>> for App {
+impl Dispatch<WlSeat, SeatId> for App {
     fn event(
         state: &mut Self,
         _proxy: &WlSeat,
         event: wl_seat::Event,
-        &data: &TypedHandle<Seat>,
+        &data: &SeatId,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
@@ -177,12 +181,12 @@ impl Dispatch<WlSeat, TypedHandle<Seat>> for App {
     }
 }
 
-impl Dispatch<WlKeyboard, TypedHandle<Seat>> for App {
+impl Dispatch<WlKeyboard, SeatId> for App {
     fn event(
         state: &mut Self,
         _proxy: &WlKeyboard,
         event: wl_keyboard::Event,
-        &data: &TypedHandle<Seat>,
+        &data: &SeatId,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
@@ -346,12 +350,12 @@ impl Dispatch<WlKeyboard, TypedHandle<Seat>> for App {
     }
 }
 
-impl Dispatch<WlOutput, TypedHandle<Output>> for App {
+impl Dispatch<WlOutput, OutputId> for App {
     fn event(
         state: &mut Self,
         _proxy: &WlOutput,
         event: wl_output::Event,
-        &data: &TypedHandle<Output>,
+        &data: &OutputId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -385,12 +389,12 @@ impl Dispatch<WlOutput, TypedHandle<Output>> for App {
     }
 }
 
-impl Dispatch<WlSurface, TypedHandle<Surface>> for App {
+impl Dispatch<WlSurface, SurfaceId> for App {
     fn event(
         state: &mut Self,
         _proxy: &WlSurface,
         event: wl_surface::Event,
-        &data: &TypedHandle<Surface>,
+        &data: &SurfaceId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -404,12 +408,12 @@ impl Dispatch<WlSurface, TypedHandle<Surface>> for App {
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, TypedHandle<Surface>> for App {
+impl Dispatch<ZwlrLayerSurfaceV1, SurfaceId> for App {
     fn event(
         state: &mut Self,
         proxy: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
-        &data: &TypedHandle<Surface>,
+        &data: &SurfaceId,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
@@ -448,12 +452,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, TypedHandle<Surface>> for App {
     }
 }
 
-impl Dispatch<ZwlrVirtualPointerV1, TypedHandle<Surface>> for App {
+impl Dispatch<ZwlrVirtualPointerV1, SurfaceId> for App {
     fn event(
         _state: &mut Self,
         _proxy: &ZwlrVirtualPointerV1,
         _event: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
-        _data: &TypedHandle<Surface>,
+        _data: &SurfaceId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -543,12 +547,12 @@ fn draw(
     wl_surface.commit();
 }
 
-impl Dispatch<WlShmPool, TypedHandle<Buffer>> for App {
+impl Dispatch<WlShmPool, BufferId> for App {
     fn event(
         _state: &mut Self,
         _proxy: &WlShmPool,
         _event: <WlShmPool as wayland_client::Proxy>::Event,
-        _data: &TypedHandle<Buffer>,
+        _data: &BufferId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -556,12 +560,12 @@ impl Dispatch<WlShmPool, TypedHandle<Buffer>> for App {
     }
 }
 
-impl Dispatch<WlBuffer, TypedHandle<Buffer>> for App {
+impl Dispatch<WlBuffer, BufferId> for App {
     fn event(
         _state: &mut Self,
         _proxy: &WlBuffer,
         event: <WlBuffer as wayland_client::Proxy>::Event,
-        _data: &TypedHandle<Buffer>,
+        _data: &BufferId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -581,16 +585,16 @@ fn make_buffer(
     height: i32,
     stride: i32,
     format: Format,
-) -> Result<TypedHandle<Buffer>> {
-    let data = buffers.insert(Buffer::default());
-    let this = &mut buffers[data];
+) -> Result<BufferId> {
+    let buffer_id = buffers.insert(Buffer::default());
+    let this = &mut buffers[buffer_id];
     let memfd = memfd::MemfdOptions::new().create("waypoint-buffer")?;
     let len = stride * height;
     memfd.as_file().write_all(&vec![0u8; len as usize])?;
     let pool = globals
         .wl_shm
-        .create_pool(memfd.as_raw_fd(), len, &qhandle, data);
-    let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, data);
+        .create_pool(memfd.as_raw_fd(), len, &qhandle, buffer_id);
+    let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, buffer_id);
     let mmap = unsafe {
         MmapOptions::new()
             .len(usize::try_from(len).unwrap())
@@ -599,7 +603,7 @@ fn make_buffer(
     this.pool = Some(pool);
     this.wl_buffer = Some(wl_buffer);
     this.mmap = Some(mmap);
-    Ok(data)
+    Ok(buffer_id)
 }
 
 fn main() -> Result<()> {
@@ -637,28 +641,24 @@ fn main() -> Result<()> {
         {
             match interface.as_str() {
                 "wl_seat" => {
-                    let data = app.seats.insert(Seat::default());
-                    let wl_seat = global_list
-                        .registry()
-                        .bind::<WlSeat, TypedHandle<Seat>, App>(
-                            name,
-                            version.max(1),
-                            &qhandle,
-                            data,
-                        );
-                    app.seats[data].wl_seat = Some(wl_seat);
+                    let seat_id = app.seats.insert(Seat::default());
+                    let wl_seat = global_list.registry().bind::<WlSeat, SeatId, App>(
+                        name,
+                        version.max(1),
+                        &qhandle,
+                        seat_id,
+                    );
+                    app.seats[seat_id].wl_seat = Some(wl_seat);
                 }
                 "wl_output" => {
-                    let data = app.outputs.insert(Output::default());
-                    let wl_output = global_list
-                        .registry()
-                        .bind::<WlOutput, TypedHandle<Output>, App>(
-                            name,
-                            version.max(1),
-                            &qhandle,
-                            data,
-                        );
-                    app.outputs[data].wl_output = Some(wl_output);
+                    let output_id = app.outputs.insert(Output::default());
+                    let wl_output = global_list.registry().bind::<WlOutput, OutputId, App>(
+                        name,
+                        version.max(1),
+                        &qhandle,
+                        output_id,
+                    );
+                    app.outputs[output_id].wl_output = Some(wl_output);
                 }
                 _ => {}
             }
@@ -666,10 +666,13 @@ fn main() -> Result<()> {
     });
     queue.roundtrip(&mut app)?;
     {
-        let data = app.surfaces.insert(Surface::default());
-        let this = &mut app.surfaces[data];
+        let surface_id = app.surfaces.insert(Surface::default());
+        let this = &mut app.surfaces[surface_id];
         let output = app.outputs.iter().next().context("no outputs")?;
-        let surface = app.globals.wl_compositor.create_surface(&qhandle, data);
+        let surface = app
+            .globals
+            .wl_compositor
+            .create_surface(&qhandle, surface_id);
         let region = app.globals.wl_compositor.create_region(&qhandle, ());
         surface.set_input_region(Some(&region));
         let layer_surface = app.globals.layer_shell.get_layer_surface(
@@ -678,7 +681,7 @@ fn main() -> Result<()> {
             Layer::Overlay,
             String::from("waypoint"),
             &qhandle,
-            data,
+            surface_id,
         );
         layer_surface.set_size(0, 0);
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
@@ -688,7 +691,7 @@ fn main() -> Result<()> {
         let virtual_pointer = app
             .globals
             .virtual_pointer_manager
-            .create_virtual_pointer(None, &qhandle, data);
+            .create_virtual_pointer(None, &qhandle, surface_id);
         this.wl_surface.set(surface).unwrap();
         this.layer_surface.set(layer_surface).unwrap();
         this.virtual_pointer.set(virtual_pointer).unwrap();
