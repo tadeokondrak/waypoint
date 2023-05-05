@@ -1,3 +1,5 @@
+#![allow(clippy::single_match)]
+
 use anyhow::{Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
@@ -227,12 +229,14 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 key,
                 state: key_state,
             } => {
+                const BTN_LEFT: u32 = 0x110;
+                const BTN_RIGHT: u32 = 0x111;
                 let Some(xkb_state) = this.xkb_state.as_mut() else { return };
                 if key_state != WEnum::Value(KeyState::Pressed) {
                     return;
                 }
                 for sym in xkb_state.key_get_syms(key + 8).iter().copied() {
-                    let mut should_click = false;
+                    let mut should_click = None;
                     match xkb::keysym_get_name(sym).as_str() {
                         "Escape" => {
                             state.will_quit = true;
@@ -292,7 +296,16 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             }
                         }
                         "Return" => {
-                            should_click = true;
+                            should_click = Some(
+                                if xkb_state.mod_name_is_active(
+                                    xkb::MOD_NAME_SHIFT,
+                                    xkb::STATE_MODS_EFFECTIVE,
+                                ) {
+                                    BTN_RIGHT
+                                } else {
+                                    BTN_LEFT
+                                },
+                            );
                             state.will_quit = true;
                         }
                         _ => {}
@@ -315,11 +328,10 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             surface.height,
                         );
                         virtual_pointer.frame();
-                        if should_click {
-                            const BTN_LEFT: u32 = 0x110;
-                            virtual_pointer.button(0, BTN_LEFT, ButtonState::Pressed);
+                        if let Some(btn) = should_click {
+                            virtual_pointer.button(0, btn, ButtonState::Pressed);
                             virtual_pointer.frame();
-                            virtual_pointer.button(0, BTN_LEFT, ButtonState::Released);
+                            virtual_pointer.button(0, btn, ButtonState::Released);
                             virtual_pointer.frame();
                         }
                     }
@@ -506,11 +518,15 @@ fn draw(
             );
             path.close();
             let path = path.finish().unwrap();
-            let mut paint = Paint::default();
-            paint.shader = Shader::SolidColor(Color::WHITE);
+            let paint = Paint {
+                shader: Shader::SolidColor(Color::WHITE),
+                ..Default::default()
+            };
             let transform = Transform::default();
-            let mut stroke = Stroke::default();
-            stroke.width = 2.0;
+            let stroke = Stroke {
+                width: 2.0,
+                ..Default::default()
+            };
             _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
 
             let mut path = path.clear();
@@ -537,8 +553,10 @@ fn draw(
             color.apply_opacity(0.25);
             paint.shader = Shader::SolidColor(color);
             let transform = Transform::default();
-            let mut stroke = Stroke::default();
-            stroke.width = 2.0;
+            let stroke = Stroke {
+                width: 2.0,
+                ..Default::default()
+            };
             _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
         }
     }
@@ -593,7 +611,7 @@ fn make_buffer(
     memfd.as_file().write_all(&vec![0u8; len as usize])?;
     let pool = globals
         .wl_shm
-        .create_pool(memfd.as_raw_fd(), len, &qhandle, buffer_id);
+        .create_pool(memfd.as_raw_fd(), len, qhandle, buffer_id);
     let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, buffer_id);
     let mmap = unsafe {
         MmapOptions::new()
