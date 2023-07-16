@@ -2,13 +2,15 @@
 
 mod scfg;
 
-use anyhow::{Context as _, Result};
+use anyhow::{bail, ensure, Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     cell::OnceCell,
+    collections::HashMap,
     io::Write,
     os::fd::{AsRawFd, IntoRawFd},
+    path::PathBuf,
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
 use wayland_client::{
@@ -40,6 +42,20 @@ use wayland_protocols_wlr::{
 };
 use xkbcommon::xkb;
 
+#[derive(Clone, Copy, Debug)]
+enum Cmd {
+    Quit,
+    Click,
+    CutUp,
+    CutDown,
+    CutLeft,
+    CutRight,
+    MoveUp,
+    MoveDown,
+    MoveLeft,
+    MoveRight,
+}
+
 struct App {
     will_quit: bool,
     _conn: Connection,
@@ -48,12 +64,17 @@ struct App {
     outputs: TypedHandleMap<Output>,
     surfaces: TypedHandleMap<Surface>,
     buffers: TypedHandleMap<Buffer>,
+    config: Config,
 }
 
 type SeatId = TypedHandle<Seat>;
 type OutputId = TypedHandle<Output>;
 type SurfaceId = TypedHandle<Surface>;
 type BufferId = TypedHandle<Buffer>;
+
+struct Config {
+    bindings: HashMap<String, Cmd>,
+}
 
 struct Globals {
     wl_shm: WlShm,
@@ -109,6 +130,91 @@ struct Buffer {
     pool: Option<WlShmPool>,
     wl_buffer: Option<WlBuffer>,
     mmap: Option<MmapMut>,
+}
+
+impl Cmd {
+    fn from_kebab_case(s: &str) -> Option<Cmd> {
+        match s {
+            "quit" => Some(Cmd::Quit),
+            "click" => Some(Cmd::Click),
+            "cut-up" => Some(Cmd::CutUp),
+            "cut-down" => Some(Cmd::CutDown),
+            "cut-left" => Some(Cmd::CutLeft),
+            "cut-right" => Some(Cmd::CutRight),
+            "move-up" => Some(Cmd::MoveUp),
+            "move-down" => Some(Cmd::MoveDown),
+            "move-left" => Some(Cmd::MoveLeft),
+            "move-right" => Some(Cmd::MoveRight),
+            _ => None,
+        }
+    }
+}
+
+impl Config {
+    fn load() -> Result<Config> {
+        let text = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| {
+                let home = PathBuf::from(std::env::var_os("HOME")?);
+                Some(home.join(".config"))
+            })
+            .map(|path| path.join("waypoint/config"))
+            .map(std::fs::read_to_string)
+            .and_then(Result::ok)
+            .unwrap_or_else(|| include_str!("../default_config").to_owned());
+        Config::parse(&text)
+    }
+
+    fn parse(s: &str) -> Result<Config> {
+        let directives = scfg::parse(s).context("invalid config")?;
+        let mut bindings = HashMap::new();
+        for directive in &directives {
+            match directive.name.as_str() {
+                "bindings" => {
+                    ensure!(
+                        directive.params.is_empty(),
+                        "invalid config: line {}: too many parameters to directive 'bindings'",
+                        directive.line,
+                    );
+
+                    for binding in &directive.children {
+                        ensure!(
+                            binding.children.is_empty(),
+                            "invalid config: line {}: binding should not have block",
+                            binding.line,
+                        );
+
+                        ensure!(
+                            binding.params.len() == 1,
+                            "invalid config: line {}: binding should have exactly one parameter",
+                            binding.line,
+                        );
+
+                        let key = &binding.name;
+                        let cmd = &binding.params[0];
+
+                        let Some(cmd) = Cmd::from_kebab_case(cmd) else {
+                            bail!(
+                                "invalid config: line {}: invalid command {:?}",
+                                binding.line,
+                                cmd,
+                            );
+                        };
+
+                        bindings.insert(key.clone(), cmd);
+                    }
+                }
+                _ => {
+                    bail!(
+                        "invalid config: line {}, invalid directive {:?}",
+                        directive.line,
+                        directive.name,
+                    );
+                }
+            }
+        }
+        Ok(Config { bindings })
+    }
 }
 
 impl Region {
@@ -287,51 +393,52 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 }
                 for sym in xkb_state.key_get_syms(key + 8).iter().copied() {
                     let mut should_click = None;
-                    match xkb::keysym_get_name(sym).as_str() {
-                        "Escape" => {
+                    let keysym_name = xkb::keysym_get_name(sym);
+                    match state.config.bindings.get(&keysym_name) {
+                        Some(Cmd::Quit) => {
                             state.will_quit = true;
                         }
-                        "h" | "Left" => {
+                        Some(Cmd::CutLeft) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.cut_left();
                             }
                         }
-                        "j" | "Down" => {
+                        Some(Cmd::CutDown) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.cut_down();
                             }
                         }
-                        "k" | "Up" => {
+                        Some(Cmd::CutUp) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.cut_up();
                             }
                         }
-                        "l" | "Right" => {
+                        Some(Cmd::CutRight) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.cut_right();
                             }
                         }
-                        "H" => {
+                        Some(Cmd::MoveLeft) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.move_left();
                             }
                         }
-                        "J" => {
+                        Some(Cmd::MoveDown) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.move_down();
                             }
                         }
-                        "K" => {
+                        Some(Cmd::MoveUp) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.move_up();
                             }
                         }
-                        "L" => {
+                        Some(Cmd::MoveRight) => {
                             for surface in state.surfaces.iter_mut() {
                                 surface.region = surface.region.move_right();
                             }
                         }
-                        "Return" => {
+                        Some(Cmd::Click) => {
                             should_click = Some(
                                 if xkb_state.mod_name_is_active(
                                     xkb::MOD_NAME_SHIFT,
@@ -344,7 +451,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             );
                             state.will_quit = true;
                         }
-                        _ => {}
+                        None => {}
                     }
                     for surface in state.surfaces.iter_mut() {
                         draw(
@@ -685,6 +792,7 @@ fn main() -> Result<()> {
         outputs: TypedHandleMap::new(),
         surfaces: TypedHandleMap::new(),
         buffers: TypedHandleMap::new(),
+        config: Config::load()?,
     };
     global_list.contents().with_list(|list| {
         for &Global {

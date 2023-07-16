@@ -1,0 +1,28 @@
+# Waypoint's default config
+# User config is usually at ~/.config/waypoint/config
+
+bindings {
+    Escape quit
+    Return click
+
+    h cut-left
+    j cut-down
+    k cut-up
+    l cut-right
+
+    Left cut-left
+    Down cut-down
+    Up cut-up
+    Right cut-right
+
+    H move-left
+    J move-down
+    K move-up
+    L move-right
+
+    # These don't work yet.
+    Shift+Left move-left
+    Shift+Down move-down
+    Shift+Up move-up
+    Shift+Right move-right
+}
