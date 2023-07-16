@@ -60,7 +60,7 @@ struct Globals {
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
 struct Region {
     x: u32,
     y: u32,
@@ -107,6 +107,50 @@ struct Buffer {
     pool: Option<WlShmPool>,
     wl_buffer: Option<WlBuffer>,
     mmap: Option<MmapMut>,
+}
+
+impl Region {
+    fn cut_up(mut self) -> Region {
+        self.height /= 2;
+        self
+    }
+
+    fn cut_down(mut self) -> Region {
+        self.height /= 2;
+        self.y += self.height;
+        self
+    }
+
+    fn cut_left(mut self) -> Region {
+        self.width /= 2;
+        self
+    }
+
+    fn cut_right(mut self) -> Region {
+        self.width /= 2;
+        self.x += self.width;
+        self
+    }
+
+    fn move_up(mut self) -> Region {
+        self.y = self.y.saturating_sub(self.height);
+        self
+    }
+
+    fn move_down(mut self) -> Region {
+        self.y = self.y.saturating_add(self.height);
+        self
+    }
+
+    fn move_left(mut self) -> Region {
+        self.x = self.x.saturating_sub(self.width);
+        self
+    }
+
+    fn move_right(mut self) -> Region {
+        self.x = self.x.saturating_add(self.width);
+        self
+    }
 }
 
 macro_rules! empty_dispatch {
@@ -247,56 +291,42 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         }
                         "h" | "Left" => {
                             for surface in state.surfaces.iter_mut() {
-                                surface.region.width /= 2;
+                                surface.region = surface.region.cut_left();
                             }
                         }
                         "j" | "Down" => {
                             for surface in state.surfaces.iter_mut() {
-                                surface.region.height /= 2;
-                                surface.region.y += surface.region.height;
+                                surface.region = surface.region.cut_down();
                             }
                         }
                         "k" | "Up" => {
                             for surface in state.surfaces.iter_mut() {
-                                surface.region.height /= 2;
+                                surface.region = surface.region.cut_up();
                             }
                         }
                         "l" | "Right" => {
                             for surface in state.surfaces.iter_mut() {
-                                surface.region.width /= 2;
-                                surface.region.x += surface.region.width;
+                                surface.region = surface.region.cut_right();
                             }
                         }
                         "H" => {
                             for surface in state.surfaces.iter_mut() {
-                                if let Some(x) = surface.region.x.checked_sub(surface.region.width)
-                                {
-                                    surface.region.x = x;
-                                }
+                                surface.region = surface.region.move_left();
                             }
                         }
                         "J" => {
                             for surface in state.surfaces.iter_mut() {
-                                if let Some(y) = surface.region.y.checked_add(surface.region.height)
-                                {
-                                    surface.region.y = y;
-                                }
+                                surface.region = surface.region.move_down();
                             }
                         }
                         "K" => {
                             for surface in state.surfaces.iter_mut() {
-                                if let Some(y) = surface.region.y.checked_sub(surface.region.height)
-                                {
-                                    surface.region.y = y;
-                                }
+                                surface.region = surface.region.move_up();
                             }
                         }
                         "L" => {
                             for surface in state.surfaces.iter_mut() {
-                                if let Some(x) = surface.region.x.checked_add(surface.region.width)
-                                {
-                                    surface.region.x = x;
-                                }
+                                surface.region = surface.region.move_right();
                             }
                         }
                         "Return" => {
