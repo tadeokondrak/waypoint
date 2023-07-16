@@ -44,7 +44,6 @@ use xkbcommon::xkb;
 
 type SeatId = TypedHandle<Seat>;
 type OutputId = TypedHandle<Output>;
-type SurfaceId = TypedHandle<Surface>;
 type BufferId = TypedHandle<Buffer>;
 
 struct App {
@@ -53,8 +52,8 @@ struct App {
     globals: Globals,
     seats: TypedHandleMap<Seat>,
     outputs: TypedHandleMap<Output>,
-    surfaces: TypedHandleMap<Surface>,
     buffers: TypedHandleMap<Buffer>,
+    surface: Option<Surface>,
     config: Config,
 }
 
@@ -117,7 +116,7 @@ struct Surface {
     width: u32,
     height: u32,
     region: Region,
-    region_history: Vec<Region>
+    region_history: Vec<Region>,
 }
 
 #[derive(Default)]
@@ -422,6 +421,10 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     return;
                 }
                 for sym in xkb_state.key_get_syms(key + 8).iter().copied() {
+                    let Some(surface) = state.surface.as_mut() else {
+                        break;
+                    };
+                    let output = &mut state.outputs[surface.output];
                     let mut should_click = None;
                     let keysym_name = xkb::keysym_get_name(sym);
                     match state.config.bindings.get(&keysym_name) {
@@ -429,99 +432,69 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             state.will_quit = true;
                         }
                         Some(Cmd::Undo) => {
-                            for surface in state.surfaces.iter_mut() {
-                                if let Some(region) = surface.region_history.pop() {
-                                    surface.region = region;
-                                }
+                            if let Some(region) = surface.region_history.pop() {
+                                surface.region = region;
                             }
                         }
                         Some(Cmd::CutLeft) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::cut_left,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::cut_left,
+                                output.region,
+                            );
                         }
                         Some(Cmd::CutDown) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::cut_down,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::cut_down,
+                                output.region,
+                            );
                         }
                         Some(Cmd::CutUp) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::cut_up,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(&mut surface.region, Region::cut_up, output.region);
                         }
                         Some(Cmd::CutRight) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::cut_right,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::cut_right,
+                                output.region,
+                            );
                         }
                         Some(Cmd::MoveLeft) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::move_left,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::move_left,
+                                output.region,
+                            );
                         }
                         Some(Cmd::MoveDown) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::move_down,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::move_down,
+                                output.region,
+                            );
                         }
                         Some(Cmd::MoveUp) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::move_up,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::move_up,
+                                output.region,
+                            );
                         }
                         Some(Cmd::MoveRight) => {
-                            for surface in state.surfaces.iter_mut() {
-                                let output = &mut state.outputs[surface.output];
-                                surface.region_history.push(surface.region);
-                                update_if_in_bounds(
-                                    &mut surface.region,
-                                    Region::move_right,
-                                    output.region,
-                                );
-                            }
+                            surface.region_history.push(surface.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::move_right,
+                                output.region,
+                            );
                         }
                         Some(Cmd::LeftClick) => {
                             should_click = Some(BTN_LEFT);
@@ -537,33 +510,28 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         }
                         None => {}
                     }
-                    for surface in state.surfaces.iter_mut() {
-                        draw(
-                            &state.globals,
-                            &mut state.buffers,
-                            qhandle,
-                            surface.width,
-                            surface.height,
-                            surface,
-                        );
-                        let virtual_pointer = &surface.virtual_pointer.get().unwrap();
-                        virtual_pointer.motion_absolute(
-                            0,
-                            surface.region.x + surface.region.width / 2,
-                            surface.region.y + surface.region.height / 2,
-                            surface.width,
-                            surface.height,
-                        );
+                    draw(
+                        &state.globals,
+                        &mut state.buffers,
+                        qhandle,
+                        surface.width,
+                        surface.height,
+                        surface,
+                    );
+                    let virtual_pointer = &surface.virtual_pointer.get().unwrap();
+                    virtual_pointer.motion_absolute(
+                        0,
+                        surface.region.x + surface.region.width / 2,
+                        surface.region.y + surface.region.height / 2,
+                        surface.width,
+                        surface.height,
+                    );
+                    virtual_pointer.frame();
+                    if let Some(btn) = should_click {
+                        virtual_pointer.button(0, btn, ButtonState::Pressed);
                         virtual_pointer.frame();
-                        if let Some(btn) = should_click {
-                            virtual_pointer.button(0, btn, ButtonState::Pressed);
-                            virtual_pointer.frame();
-                            virtual_pointer.button(0, btn, ButtonState::Released);
-                            virtual_pointer.frame();
-                        }
-                    }
-                    if state.will_quit {
-                        break;
+                        virtual_pointer.button(0, btn, ButtonState::Released);
+                        virtual_pointer.frame();
                     }
                 }
             }
@@ -639,17 +607,16 @@ impl Dispatch<WlOutput, OutputId> for App {
     }
 }
 
-impl Dispatch<WlSurface, SurfaceId> for App {
+impl Dispatch<WlSurface, ()> for App {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         _proxy: &WlSurface,
         event: wl_surface::Event,
-        &data: &SurfaceId,
+        &(): &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
         use wl_surface::Event;
-        let _this = &mut state.surfaces[data];
         match event {
             Event::Enter { output: _ } => {}
             Event::Leave { output: _ } => {}
@@ -658,17 +625,17 @@ impl Dispatch<WlSurface, SurfaceId> for App {
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, SurfaceId> for App {
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
     fn event(
         state: &mut Self,
         proxy: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
-        &data: &SurfaceId,
+        &(): &(),
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
         use zwlr_layer_surface_v1::Event;
-        let this = &mut state.surfaces[data];
+        let this = &mut state.surface.as_mut().unwrap();
         match event {
             Event::Configure {
                 serial,
@@ -695,19 +662,19 @@ impl Dispatch<ZwlrLayerSurfaceV1, SurfaceId> for App {
                 );
             }
             Event::Closed => {
-                state.surfaces.remove(data);
+                state.surface = None;
             }
             _ => {}
         }
     }
 }
 
-impl Dispatch<ZwlrVirtualPointerV1, SurfaceId> for App {
+impl Dispatch<ZwlrVirtualPointerV1, ()> for App {
     fn event(
         _state: &mut Self,
         _proxy: &ZwlrVirtualPointerV1,
         _event: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
-        _data: &SurfaceId,
+        &(): &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
@@ -885,8 +852,8 @@ fn main() -> Result<()> {
         },
         seats: TypedHandleMap::new(),
         outputs: TypedHandleMap::new(),
-        surfaces: TypedHandleMap::new(),
         buffers: TypedHandleMap::new(),
+        surface: None,
         config: Config::load()?,
     };
     global_list.contents().with_list(|list| {
@@ -923,17 +890,14 @@ fn main() -> Result<()> {
     });
     queue.roundtrip(&mut app)?;
     {
-        let surface_id = app.surfaces.insert(Surface::default());
-        let this = &mut app.surfaces[surface_id];
+        app.surface = Some(Surface::default());
+        let this = app.surface.as_mut().unwrap();
         let (output_id, output) = app
             .outputs
             .iter_with_handles()
             .next()
             .context("no outputs")?;
-        let surface = app
-            .globals
-            .wl_compositor
-            .create_surface(&qhandle, surface_id);
+        let surface = app.globals.wl_compositor.create_surface(&qhandle, ());
         let region = app.globals.wl_compositor.create_region(&qhandle, ());
         surface.set_input_region(Some(&region));
         let layer_surface = app.globals.layer_shell.get_layer_surface(
@@ -942,17 +906,17 @@ fn main() -> Result<()> {
             Layer::Overlay,
             String::from("waypoint"),
             &qhandle,
-            surface_id,
+            (),
         );
         layer_surface.set_size(0, 0);
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         surface.commit();
-        let virtual_pointer = app
-            .globals
-            .virtual_pointer_manager
-            .create_virtual_pointer(None, &qhandle, surface_id);
+        let virtual_pointer =
+            app.globals
+                .virtual_pointer_manager
+                .create_virtual_pointer(None, &qhandle, ());
         this.output = output_id;
         this.wl_surface.set(surface).unwrap();
         this.layer_surface.set(layer_surface).unwrap();
