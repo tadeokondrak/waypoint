@@ -170,7 +170,9 @@ impl Dispatch<WlSeat, SeatId> for App {
         let this = &mut state.seats[data];
         match event {
             Event::Capabilities { capabilities } => {
-                let WEnum::Value(v) = capabilities else { return };
+                let WEnum::Value(v) = capabilities else {
+                    return;
+                };
                 if v.contains(Capability::Keyboard) {
                     _proxy.get_keyboard(qhandle, data);
                 }
@@ -231,7 +233,9 @@ impl Dispatch<WlKeyboard, SeatId> for App {
             } => {
                 const BTN_LEFT: u32 = 0x110;
                 const BTN_RIGHT: u32 = 0x111;
-                let Some(xkb_state) = this.xkb_state.as_mut() else { return };
+                let Some(xkb_state) = this.xkb_state.as_mut() else {
+                    return;
+                };
                 if key_state != WEnum::Value(KeyState::Pressed) {
                     return;
                 }
