@@ -3,7 +3,7 @@
 
 bindings {
     Escape quit
-    Return click
+    Return left-click
 
     h cut-left
     j cut-down

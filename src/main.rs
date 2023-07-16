@@ -45,7 +45,9 @@ use xkbcommon::xkb;
 #[derive(Clone, Copy, Debug)]
 enum Cmd {
     Quit,
-    Click,
+    LeftClick,
+    RightClick,
+    MiddleClick,
     CutUp,
     CutDown,
     CutLeft,
@@ -136,7 +138,9 @@ impl Cmd {
     fn from_kebab_case(s: &str) -> Option<Cmd> {
         match s {
             "quit" => Some(Cmd::Quit),
-            "click" => Some(Cmd::Click),
+            "left-click" => Some(Cmd::LeftClick),
+            "right-click" => Some(Cmd::RightClick),
+            "middle-click" => Some(Cmd::MiddleClick),
             "cut-up" => Some(Cmd::CutUp),
             "cut-down" => Some(Cmd::CutDown),
             "cut-left" => Some(Cmd::CutLeft),
@@ -385,6 +389,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
             } => {
                 const BTN_LEFT: u32 = 0x110;
                 const BTN_RIGHT: u32 = 0x111;
+                const BTN_MIDDLE: u32 = 0x112;
                 let Some(xkb_state) = this.xkb_state.as_mut() else {
                     return;
                 };
@@ -438,17 +443,16 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                                 surface.region = surface.region.move_right();
                             }
                         }
-                        Some(Cmd::Click) => {
-                            should_click = Some(
-                                if xkb_state.mod_name_is_active(
-                                    xkb::MOD_NAME_SHIFT,
-                                    xkb::STATE_MODS_EFFECTIVE,
-                                ) {
-                                    BTN_RIGHT
-                                } else {
-                                    BTN_LEFT
-                                },
-                            );
+                        Some(Cmd::LeftClick) => {
+                            should_click = Some(BTN_LEFT);
+                            state.will_quit = true;
+                        }
+                        Some(Cmd::RightClick) => {
+                            should_click = Some(BTN_RIGHT);
+                            state.will_quit = true;
+                        }
+                        Some(Cmd::MiddleClick) => {
+                            should_click = Some(BTN_MIDDLE);
                             state.will_quit = true;
                         }
                         None => {}
