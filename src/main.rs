@@ -1,5 +1,7 @@
 #![allow(clippy::single_match)]
 
+mod scfg;
+
 use anyhow::{Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
