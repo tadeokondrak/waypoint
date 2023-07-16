@@ -7,7 +7,7 @@ use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     cell::OnceCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     os::fd::{AsRawFd, IntoRawFd},
     path::PathBuf,
@@ -64,6 +64,8 @@ enum Cmd {
     LeftClick,
     RightClick,
     MiddleClick,
+    LeftPress,
+    LeftRelease,
     CutUp,
     CutDown,
     CutLeft,
@@ -117,6 +119,8 @@ struct Surface {
     height: u32,
     region: Region,
     region_history: Vec<Region>,
+    cursor_position: Option<(u32, u32)>,
+    buttons_pressed: HashSet<u32>,
 }
 
 #[derive(Default)]
@@ -145,6 +149,8 @@ impl Cmd {
             "left-click" => Some(Cmd::LeftClick),
             "right-click" => Some(Cmd::RightClick),
             "middle-click" => Some(Cmd::MiddleClick),
+            "left-press" => Some(Cmd::LeftPress),
+            "left-release" => Some(Cmd::LeftRelease),
             "cut-up" => Some(Cmd::CutUp),
             "cut-down" => Some(Cmd::CutDown),
             "cut-left" => Some(Cmd::CutLeft),
@@ -414,18 +420,22 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 const BTN_LEFT: u32 = 0x110;
                 const BTN_RIGHT: u32 = 0x111;
                 const BTN_MIDDLE: u32 = 0x112;
+
                 let Some(xkb_state) = this.xkb_state.as_mut() else {
                     return;
                 };
+
                 if key_state != WEnum::Value(KeyState::Pressed) {
                     return;
                 }
+
                 for sym in xkb_state.key_get_syms(key + 8).iter().copied() {
                     let Some(surface) = state.surface.as_mut() else {
                         break;
                     };
                     let output = &mut state.outputs[surface.output];
-                    let mut should_click = None;
+                    let mut should_press = None;
+                    let mut should_release = None;
                     let keysym_name = xkb::keysym_get_name(sym);
                     match state.config.bindings.get(&keysym_name) {
                         Some(Cmd::Quit) => {
@@ -497,16 +507,25 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             );
                         }
                         Some(Cmd::LeftClick) => {
-                            should_click = Some(BTN_LEFT);
+                            should_press = Some(BTN_LEFT);
+                            should_release = Some(BTN_LEFT);
                             state.will_quit = true;
                         }
                         Some(Cmd::RightClick) => {
-                            should_click = Some(BTN_RIGHT);
+                            should_press = Some(BTN_RIGHT);
+                            should_release = Some(BTN_RIGHT);
                             state.will_quit = true;
                         }
                         Some(Cmd::MiddleClick) => {
-                            should_click = Some(BTN_MIDDLE);
+                            should_press = Some(BTN_MIDDLE);
+                            should_release = Some(BTN_MIDDLE);
                             state.will_quit = true;
+                        }
+                        Some(Cmd::LeftPress) => {
+                            should_press = Some(BTN_LEFT);
+                        }
+                        Some(Cmd::LeftRelease) => {
+                            should_release = Some(BTN_LEFT);
                         }
                         None => {}
                     }
@@ -518,7 +537,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         surface.height,
                         surface,
                     );
-                    let virtual_pointer = &surface.virtual_pointer.get().unwrap();
+                    let virtual_pointer = surface.virtual_pointer.get().unwrap();
                     virtual_pointer.motion_absolute(
                         0,
                         surface.region.x + surface.region.width / 2,
@@ -527,11 +546,17 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         surface.height,
                     );
                     virtual_pointer.frame();
-                    if let Some(btn) = should_click {
-                        virtual_pointer.button(0, btn, ButtonState::Pressed);
-                        virtual_pointer.frame();
-                        virtual_pointer.button(0, btn, ButtonState::Released);
-                        virtual_pointer.frame();
+                    if let Some(btn) = should_press {
+                        if surface.buttons_pressed.insert(btn) {
+                            virtual_pointer.button(0, btn, ButtonState::Pressed);
+                            virtual_pointer.frame();
+                        }
+                    }
+                    if let Some(btn) = should_release {
+                        if surface.buttons_pressed.remove(&btn) {
+                            virtual_pointer.button(0, btn, ButtonState::Released);
+                            virtual_pointer.frame();
+                        }
                     }
                 }
             }
@@ -925,6 +950,16 @@ fn main() -> Result<()> {
     while !app.will_quit {
         queue.blocking_dispatch(&mut app)?;
     }
+
+    if let Some(surface) = &app.surface {
+        if let Some(virtual_pointer) = surface.virtual_pointer.get() {
+            for &button in &surface.buttons_pressed {
+                virtual_pointer.button(0, button, ButtonState::Released);
+                virtual_pointer.frame();
+            }
+        }
+    }
+
     queue.flush()?;
     Ok(())
 }
