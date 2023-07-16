@@ -390,7 +390,6 @@ dependencies = [
  "memfd",
  "memmap2",
  "nix",
- "once_cell",
  "tiny-skia",
  "wayland-client",
  "wayland-protocols",
