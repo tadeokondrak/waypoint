@@ -61,6 +61,7 @@ struct App {
 #[derive(Clone, Copy, Debug)]
 enum Cmd {
     Quit,
+    Undo,
     LeftClick,
     RightClick,
     MiddleClick,
@@ -116,6 +117,7 @@ struct Surface {
     width: u32,
     height: u32,
     region: Region,
+    region_history: Vec<Region>
 }
 
 #[derive(Default)]
@@ -140,6 +142,7 @@ impl Cmd {
     fn from_kebab_case(s: &str) -> Option<Cmd> {
         match s {
             "quit" => Some(Cmd::Quit),
+            "undo" => Some(Cmd::Undo),
             "left-click" => Some(Cmd::LeftClick),
             "right-click" => Some(Cmd::RightClick),
             "middle-click" => Some(Cmd::MiddleClick),
@@ -425,9 +428,17 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::Quit) => {
                             state.will_quit = true;
                         }
+                        Some(Cmd::Undo) => {
+                            for surface in state.surfaces.iter_mut() {
+                                if let Some(region) = surface.region_history.pop() {
+                                    surface.region = region;
+                                }
+                            }
+                        }
                         Some(Cmd::CutLeft) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::cut_left,
@@ -438,6 +449,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::CutDown) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::cut_down,
@@ -448,6 +460,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::CutUp) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::cut_up,
@@ -458,6 +471,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::CutRight) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::cut_right,
@@ -468,6 +482,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::MoveLeft) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::move_left,
@@ -478,6 +493,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::MoveDown) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::move_down,
@@ -488,6 +504,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::MoveUp) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::move_up,
@@ -498,6 +515,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         Some(Cmd::MoveRight) => {
                             for surface in state.surfaces.iter_mut() {
                                 let output = &mut state.outputs[surface.output];
+                                surface.region_history.push(surface.region);
                                 update_if_in_bounds(
                                     &mut surface.region,
                                     Region::move_right,
