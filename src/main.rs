@@ -1,4 +1,4 @@
-#![allow(clippy::single_match)]
+#![allow(clippy::single_match, clippy::match_single_binding)]
 
 mod scfg;
 
@@ -16,7 +16,7 @@ use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
 use wayland_client::{
     globals::{registry_queue_init, Global, GlobalListContents},
     protocol::{
-        wl_buffer::WlBuffer,
+        wl_buffer::{self, WlBuffer},
         wl_compositor::WlCompositor,
         wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_output::{self, WlOutput},
@@ -25,7 +25,7 @@ use wayland_client::{
         wl_registry::{self, WlRegistry},
         wl_seat::{self, Capability, WlSeat},
         wl_shm::{Format, WlShm},
-        wl_shm_pool::WlShmPool,
+        wl_shm_pool::{self, WlShmPool},
         wl_surface::{self, WlSurface},
     },
     Connection, Dispatch, QueueHandle, WEnum,
@@ -37,7 +37,7 @@ use wayland_protocols_wlr::{
     },
     virtual_pointer::v1::client::{
         zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-        zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
+        zwlr_virtual_pointer_v1::{self, ZwlrVirtualPointerV1},
     },
 };
 use xkbcommon::xkb;
@@ -90,6 +90,12 @@ struct Globals {
     wl_compositor: WlCompositor,
     layer_shell: ZwlrLayerShellV1,
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
+}
+
+#[derive(Default, Clone, Copy)]
+struct Point {
+    x: u32,
+    y: u32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -254,6 +260,13 @@ impl Config {
 }
 
 impl Region {
+    fn center(self) -> Point {
+        Point {
+            x: self.x + self.width / 2,
+            y: self.y + self.height / 2,
+        }
+    }
+
     fn cut_up(mut self) -> Region {
         self.height /= 2;
         self
@@ -533,8 +546,8 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     let virtual_pointer = &surface.virtual_pointer.get().unwrap();
                     virtual_pointer.motion_absolute(
                         0,
-                        surface.region.x + surface.region.width / 2,
-                        surface.region.y + surface.region.height / 2,
+                        surface.region.center().x,
+                        surface.region.center().y,
                         surface.width,
                         surface.height,
                     );
@@ -687,12 +700,14 @@ impl Dispatch<ZwlrVirtualPointerV1, ()> for App {
     fn event(
         _state: &mut Self,
         _proxy: &ZwlrVirtualPointerV1,
-        _event: <ZwlrVirtualPointerV1 as wayland_client::Proxy>::Event,
+        event: zwlr_virtual_pointer_v1::Event,
         &(): &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        todo!()
+        match event {
+            _ => {}
+        }
     }
 }
 
@@ -775,12 +790,14 @@ impl Dispatch<WlShmPool, BufferId> for App {
     fn event(
         _state: &mut Self,
         _proxy: &WlShmPool,
-        _event: <WlShmPool as wayland_client::Proxy>::Event,
+        event: wl_shm_pool::Event,
         _data: &BufferId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
-        todo!()
+        match event {
+            _ => {}
+        }
     }
 }
 
@@ -788,7 +805,7 @@ impl Dispatch<WlBuffer, BufferId> for App {
     fn event(
         _state: &mut Self,
         _proxy: &WlBuffer,
-        event: <WlBuffer as wayland_client::Proxy>::Event,
+        event: wl_buffer::Event,
         _data: &BufferId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
@@ -839,16 +856,16 @@ fn main() -> Result<()> {
         _conn: conn,
         globals: Globals {
             wl_shm: global_list
-                .bind::<WlShm, App, ()>(&qhandle, 1..=1, ())
+                .bind(&qhandle, 1..=1, ())
                 .context("compositor doesn't support wl_shm")?,
             wl_compositor: global_list
-                .bind::<WlCompositor, App, ()>(&qhandle, 4..=4, ())
+                .bind(&qhandle, 4..=4, ())
                 .context("compositor doesn't support wl_compositor")?,
             layer_shell: global_list
-                .bind::<ZwlrLayerShellV1, App, ()>(&qhandle, 1..=1, ())
+                .bind(&qhandle, 1..=1, ())
                 .context("compositor doesn't support zwlr_layer_shell_v1")?,
             virtual_pointer_manager: global_list
-                .bind::<ZwlrVirtualPointerManagerV1, App, ()>(&qhandle, 1..=1, ())
+                .bind(&qhandle, 1..=1, ())
                 .context("compositor doesn't support zwlr_virtual_pointer_manager_v1")?,
         },
         seats: TypedHandleMap::new(),
