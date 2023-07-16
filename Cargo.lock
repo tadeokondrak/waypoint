@@ -389,7 +389,6 @@ dependencies = [
  "handy",
  "memfd",
  "memmap2",
- "nix",
  "tiny-skia",
  "wayland-client",
  "wayland-protocols",
