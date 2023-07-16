@@ -42,6 +42,22 @@ use wayland_protocols_wlr::{
 };
 use xkbcommon::xkb;
 
+type SeatId = TypedHandle<Seat>;
+type OutputId = TypedHandle<Output>;
+type SurfaceId = TypedHandle<Surface>;
+type BufferId = TypedHandle<Buffer>;
+
+struct App {
+    will_quit: bool,
+    _conn: Connection,
+    globals: Globals,
+    seats: TypedHandleMap<Seat>,
+    outputs: TypedHandleMap<Output>,
+    surfaces: TypedHandleMap<Surface>,
+    buffers: TypedHandleMap<Buffer>,
+    config: Config,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Cmd {
     Quit,
@@ -57,22 +73,6 @@ enum Cmd {
     MoveLeft,
     MoveRight,
 }
-
-struct App {
-    will_quit: bool,
-    _conn: Connection,
-    globals: Globals,
-    seats: TypedHandleMap<Seat>,
-    outputs: TypedHandleMap<Output>,
-    surfaces: TypedHandleMap<Surface>,
-    buffers: TypedHandleMap<Buffer>,
-    config: Config,
-}
-
-type SeatId = TypedHandle<Seat>;
-type OutputId = TypedHandle<Output>;
-type SurfaceId = TypedHandle<Surface>;
-type BufferId = TypedHandle<Buffer>;
 
 struct Config {
     bindings: HashMap<String, Cmd>,
@@ -100,17 +100,6 @@ struct Seat {
     xkb_state: Option<xkb::State>,
 }
 
-impl Seat {
-    fn default() -> Seat {
-        Seat {
-            name: None,
-            wl_seat: None,
-            xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-            xkb_state: None,
-        }
-    }
-}
-
 #[derive(Default)]
 struct Output {
     name: Option<String>,
@@ -132,6 +121,17 @@ struct Buffer {
     pool: Option<WlShmPool>,
     wl_buffer: Option<WlBuffer>,
     mmap: Option<MmapMut>,
+}
+
+impl Seat {
+    fn default() -> Seat {
+        Seat {
+            name: None,
+            wl_seat: None,
+            xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
+            xkb_state: None,
+        }
+    }
 }
 
 impl Cmd {
