@@ -286,8 +286,16 @@ impl Region {
             height: self.height / inverse_scale,
         }
     }
-}
 
+    fn scale(&self, scale: u32) -> Region {
+        Region {
+            x: self.x * scale,
+            y: self.y * scale,
+            width: self.width * scale,
+            height: self.height * scale,
+        }
+    }
+}
 
 impl Output {
     fn scaled_region(&self) -> Region {
@@ -514,7 +522,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::move_right,
-                                output.unscaled_region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::LeftClick) => {
@@ -537,6 +545,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         qhandle,
                         surface.width,
                         surface.height,
+                        output.scale,
                         surface,
                     );
                     let virtual_pointer = &surface.virtual_pointer.get().unwrap();
@@ -658,6 +667,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
     ) {
         use zwlr_layer_surface_v1::Event;
         let this = &mut state.surface.as_mut().unwrap();
+        let output = &mut state.outputs[this.output];
         match event {
             Event::Configure {
                 serial,
@@ -680,6 +690,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
                     qhandle,
                     width,
                     height,
+                    output.scale,
                     this,
                 );
             }
@@ -710,6 +721,7 @@ fn draw(
     qhandle: &QueueHandle<App>,
     width: u32,
     height: u32,
+    scale: u32,
     this: &mut Surface,
 ) {
     let wl_surface = this.wl_surface.get().unwrap();
@@ -717,76 +729,62 @@ fn draw(
         globals,
         buffers,
         qhandle,
-        width as i32,
-        height as i32,
-        (width * 4) as i32,
+        i32::try_from(width * scale).unwrap(),
+        i32::try_from(height * scale).unwrap(),
+        i32::try_from(width * scale * 4).unwrap(),
         Format::Argb8888,
     )
     .unwrap();
     let buffer = &mut buffers[buffer_data];
-    let mut pixmap =
-        tiny_skia::PixmapMut::from_bytes(buffer.mmap.as_deref_mut().unwrap(), width, height)
-            .unwrap();
+    let mut pixmap = tiny_skia::PixmapMut::from_bytes(
+        buffer.mmap.as_deref_mut().unwrap(),
+        width * scale,
+        height * scale,
+    )
+    .unwrap();
     {
-        {
-            let mut path = PathBuilder::new();
-            path.move_to(this.region.x as f32, this.region.y as f32);
-            path.line_to(
-                (this.region.x + this.region.width) as f32,
-                this.region.y as f32,
-            );
-            path.line_to(
-                (this.region.x + this.region.width) as f32,
-                (this.region.y + this.region.height) as f32,
-            );
-            path.line_to(
-                this.region.x as f32,
-                (this.region.y + this.region.height) as f32,
-            );
-            path.close();
-            let path = path.finish().unwrap();
-            let paint = Paint {
-                shader: Shader::SolidColor(Color::WHITE),
-                ..Default::default()
-            };
-            let transform = Transform::default();
-            let stroke = Stroke {
-                width: 2.0,
-                ..Default::default()
-            };
-            _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+        let region = this.region.scale(scale);
+        let mut path = PathBuilder::new();
+        let region_x = region.x as f32;
+        let region_y = region.y as f32;
+        let region_width = region.width as f32;
+        let region_height = region.height as f32;
+        path.move_to(region_x, region_y);
+        path.line_to(region_x + region_width, region_y);
+        path.line_to(region_x + region_width, region_y + region_height);
+        path.line_to(region_x, region_y + region_height);
+        path.close();
+        let path = path.finish().unwrap();
+        let paint = Paint {
+            shader: Shader::SolidColor(Color::WHITE),
+            ..Default::default()
+        };
+        let transform = Transform::default();
+        let stroke = Stroke {
+            width: 1.0,
+            ..Default::default()
+        };
+        _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
 
-            let mut path = path.clear();
-            path.move_to(
-                this.region.x as f32,
-                (this.region.y + this.region.height / 2) as f32,
-            );
-            path.line_to(
-                (this.region.x + this.region.width) as f32,
-                (this.region.y + this.region.height / 2) as f32,
-            );
-            path.close();
-            path.move_to(
-                (this.region.x + this.region.width / 2) as f32,
-                this.region.y as f32,
-            );
-            path.line_to(
-                (this.region.x + this.region.width / 2) as f32,
-                (this.region.y + this.region.height) as f32,
-            );
-            let path = path.finish().unwrap();
-            let mut paint = Paint::default();
-            let mut color = Color::WHITE;
-            color.apply_opacity(0.25);
-            paint.shader = Shader::SolidColor(color);
-            let transform = Transform::default();
-            let stroke = Stroke {
-                width: 2.0,
-                ..Default::default()
-            };
-            _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
-        }
+        let mut path = path.clear();
+        path.move_to(region_x, region_y + region_height / 2.0);
+        path.line_to(region_x + region_width, region_y + region_height / 2.0);
+        path.close();
+        path.move_to(region_x + region_width / 2.0, region_y);
+        path.line_to(region_x + region_width / 2.0, region_y + region_height);
+        let path = path.finish().unwrap();
+        let mut paint = Paint::default();
+        let mut color = Color::WHITE;
+        color.apply_opacity(0.25);
+        paint.shader = Shader::SolidColor(color);
+        let transform = Transform::default();
+        let stroke = Stroke {
+            width: 2.0,
+            ..Default::default()
+        };
+        _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
     }
+    wl_surface.set_buffer_scale(i32::try_from(scale).unwrap());
     wl_surface.attach(Some(buffer.wl_buffer.as_ref().unwrap()), 0, 0);
     wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
     wl_surface.commit();
