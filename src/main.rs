@@ -104,7 +104,8 @@ struct Seat {
 struct Output {
     name: Option<String>,
     wl_output: Option<WlOutput>,
-    region: Region,
+    scale: u32,
+    unscaled_region: Region,
 }
 
 #[derive(Default)]
@@ -276,6 +277,22 @@ impl Region {
         self.contains(other.x, other.y)
             && self.contains(other.x + other.width - 1, other.y + other.height - 1)
     }
+
+    fn inverse_scale(&self, inverse_scale: u32) -> Region {
+        Region {
+            x: self.x / inverse_scale,
+            y: self.y / inverse_scale,
+            width: self.width / inverse_scale,
+            height: self.height / inverse_scale,
+        }
+    }
+}
+
+
+impl Output {
+    fn scaled_region(&self) -> Region {
+        self.unscaled_region.inverse_scale(self.scale)
+    }
 }
 
 macro_rules! empty_dispatch {
@@ -441,7 +458,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::cut_left,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::CutDown) => {
@@ -449,19 +466,23 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::cut_down,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::CutUp) => {
                             surface.region_history.push(surface.region);
-                            update_if_in_bounds(&mut surface.region, Region::cut_up, output.region);
+                            update_if_in_bounds(
+                                &mut surface.region,
+                                Region::cut_up,
+                                output.scaled_region(),
+                            );
                         }
                         Some(Cmd::CutRight) => {
                             surface.region_history.push(surface.region);
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::cut_right,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::MoveLeft) => {
@@ -469,7 +490,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::move_left,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::MoveDown) => {
@@ -477,7 +498,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::move_down,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::MoveUp) => {
@@ -485,7 +506,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::move_up,
-                                output.region,
+                                output.scaled_region(),
                             );
                         }
                         Some(Cmd::MoveRight) => {
@@ -493,7 +514,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             update_if_in_bounds(
                                 &mut surface.region,
                                 Region::move_right,
-                                output.region,
+                                output.unscaled_region,
                             );
                         }
                         Some(Cmd::LeftClick) => {
@@ -570,18 +591,15 @@ impl Dispatch<WlOutput, OutputId> for App {
         let this = &mut state.outputs[data];
         match event {
             Event::Geometry {
-                x,
-                y,
+                x: _,
+                y: _,
                 physical_width: _,
                 physical_height: _,
                 subpixel: _,
                 make: _,
                 model: _,
                 transform: _,
-            } => {
-                this.region.x = u32::try_from(x).expect("negative output coordinates");
-                this.region.y = u32::try_from(y).expect("negative output coordinates");
-            }
+            } => {}
             Event::Mode {
                 flags,
                 width,
@@ -592,12 +610,16 @@ impl Dispatch<WlOutput, OutputId> for App {
                     return;
                 };
                 if flags.contains(wl_output::Mode::Current) {
-                    this.region.width = u32::try_from(width).expect("negative output size");
-                    this.region.height = u32::try_from(height).expect("negative output size");
+                    this.unscaled_region.width =
+                        u32::try_from(width).expect("negative output size");
+                    this.unscaled_region.height =
+                        u32::try_from(height).expect("negative output size");
                 }
             }
             Event::Done => {}
-            Event::Scale { factor: _ } => {}
+            Event::Scale { factor } => {
+                this.scale = u32::try_from(factor).expect("negative scale factor");
+            }
             Event::Name { name } => {
                 this.name = Some(name);
             }
