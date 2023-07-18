@@ -425,14 +425,12 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 key,
                 state: key_state,
             } => {
-                fn update_if_in_bounds(
-                    region: &mut Region,
-                    f: impl FnOnce(Region) -> Region,
-                    bounds: Region,
-                ) {
-                    let new_region = f(*region);
+                fn update(surface: &mut Surface, output: &mut Output, cut: fn(Region) -> Region) {
+                    surface.region_history.push(surface.region);
+                    let bounds = output.scaled_region();
+                    let new_region = cut(surface.region);
                     if bounds.contains_region(&new_region) {
-                        *region = new_region;
+                        surface.region = new_region;
                     }
                 }
 
@@ -461,70 +459,14 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                                 surface.region = region;
                             }
                         }
-                        Some(Cmd::CutLeft) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::cut_left,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::CutDown) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::cut_down,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::CutUp) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::cut_up,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::CutRight) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::cut_right,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::MoveLeft) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::move_left,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::MoveDown) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::move_down,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::MoveUp) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::move_up,
-                                output.scaled_region(),
-                            );
-                        }
-                        Some(Cmd::MoveRight) => {
-                            surface.region_history.push(surface.region);
-                            update_if_in_bounds(
-                                &mut surface.region,
-                                Region::move_right,
-                                output.scaled_region(),
-                            );
-                        }
+                        Some(Cmd::CutLeft) => update(surface, output, Region::cut_left),
+                        Some(Cmd::CutDown) => update(surface, output, Region::cut_down),
+                        Some(Cmd::CutUp) => update(surface, output, Region::cut_up),
+                        Some(Cmd::CutRight) => update(surface, output, Region::cut_right),
+                        Some(Cmd::MoveLeft) => update(surface, output, Region::move_left),
+                        Some(Cmd::MoveDown) => update(surface, output, Region::move_down),
+                        Some(Cmd::MoveUp) => update(surface, output, Region::move_up),
+                        Some(Cmd::MoveRight) => update(surface, output, Region::move_right),
                         Some(Cmd::LeftClick) => {
                             should_click = Some(BTN_LEFT);
                             state.will_quit = true;
