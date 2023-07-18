@@ -94,18 +94,23 @@ struct Region {
 }
 
 struct Seat {
-    name: Option<String>,
     wl_seat: Option<WlSeat>,
     xkb: xkb::Context,
     xkb_state: Option<xkb::State>,
+    keyboard: Option<WlKeyboard>,
 }
 
 #[derive(Default)]
 struct Output {
-    name: Option<String>,
     wl_output: Option<WlOutput>,
+    state: DoubleBuffered<OutputState>,
+}
+
+#[derive(Default, Clone)]
+struct OutputState {
     scale: u32,
-    unscaled_region: Region,
+    width: u32,
+    height: u32,
 }
 
 #[derive(Default)]
@@ -127,13 +132,28 @@ struct Buffer {
     mmap: Option<MmapMut>,
 }
 
+#[derive(Default)]
+struct DoubleBuffered<T> {
+    pending: T,
+    current: Option<T>,
+}
+
+impl<T: Clone> DoubleBuffered<T> {
+    fn commit(&mut self) {
+        match self.current.as_mut() {
+            Some(current) => current.clone_from(&self.pending),
+            None => self.current = Some(self.pending.clone()),
+        }
+    }
+}
+
 impl Seat {
     fn default() -> Seat {
         Seat {
-            name: None,
             wl_seat: None,
             xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_state: None,
+            keyboard: None,
         }
     }
 }
@@ -299,7 +319,14 @@ impl Region {
 
 impl Output {
     fn scaled_region(&self) -> Region {
-        self.unscaled_region.inverse_scale(self.scale)
+        let current = self.state.current.as_ref().unwrap();
+        Region {
+            x: 0,
+            y: 0,
+            width: current.width,
+            height: current.height,
+        }
+        .inverse_scale(current.scale)
     }
 }
 
@@ -354,7 +381,7 @@ impl Dispatch<WlRegistry, GlobalListContents> for App {
 impl Dispatch<WlSeat, SeatId> for App {
     fn event(
         state: &mut Self,
-        _proxy: &WlSeat,
+        proxy: &WlSeat,
         event: wl_seat::Event,
         &data: &SeatId,
         _conn: &Connection,
@@ -368,12 +395,10 @@ impl Dispatch<WlSeat, SeatId> for App {
                     return;
                 };
                 if v.contains(Capability::Keyboard) {
-                    _proxy.get_keyboard(qhandle, data);
+                    this.keyboard = Some(proxy.get_keyboard(qhandle, data));
                 }
             }
-            Event::Name { name } => {
-                this.name = Some(name);
-            }
+            Event::Name { name: _ } => {}
             _ => {}
         }
     }
@@ -487,7 +512,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         qhandle,
                         surface.width,
                         surface.height,
-                        output.scale,
+                        output.state.current.as_ref().unwrap().scale,
                         surface,
                     );
                     let virtual_pointer = &surface.virtual_pointer.get().unwrap();
@@ -561,19 +586,18 @@ impl Dispatch<WlOutput, OutputId> for App {
                     return;
                 };
                 if flags.contains(wl_output::Mode::Current) {
-                    this.unscaled_region.width =
-                        u32::try_from(width).expect("negative output size");
-                    this.unscaled_region.height =
-                        u32::try_from(height).expect("negative output size");
+                    this.state.pending.width = u32::try_from(width).expect("negative output width");
+                    this.state.pending.height =
+                        u32::try_from(height).expect("negative output height");
                 }
             }
-            Event::Done => {}
+            Event::Done => {
+                this.state.commit();
+            }
             Event::Scale { factor } => {
-                this.scale = u32::try_from(factor).expect("negative scale factor");
+                this.state.pending.scale = u32::try_from(factor).expect("negative scale factor");
             }
-            Event::Name { name } => {
-                this.name = Some(name);
-            }
+            Event::Name { name: _ } => {}
             Event::Description { description: _ } => {}
             _ => {}
         }
@@ -632,7 +656,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
                     qhandle,
                     width,
                     height,
-                    output.scale,
+                    output.state.current.as_ref().unwrap().scale,
                     this,
                 );
             }
