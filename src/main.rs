@@ -58,20 +58,27 @@ struct App {
 }
 
 #[derive(Clone, Copy, Debug)]
+enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Button {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Clone, Copy, Debug)]
 enum Cmd {
     Quit,
     Undo,
-    LeftClick,
-    RightClick,
-    MiddleClick,
-    CutUp,
-    CutDown,
-    CutLeft,
-    CutRight,
-    MoveUp,
-    MoveDown,
-    MoveLeft,
-    MoveRight,
+    Click(Button),
+    Cut(Direction),
+    Move(Direction),
 }
 
 struct Config {
@@ -163,17 +170,17 @@ impl Cmd {
         match s {
             "quit" => Some(Cmd::Quit),
             "undo" => Some(Cmd::Undo),
-            "left-click" => Some(Cmd::LeftClick),
-            "right-click" => Some(Cmd::RightClick),
-            "middle-click" => Some(Cmd::MiddleClick),
-            "cut-up" => Some(Cmd::CutUp),
-            "cut-down" => Some(Cmd::CutDown),
-            "cut-left" => Some(Cmd::CutLeft),
-            "cut-right" => Some(Cmd::CutRight),
-            "move-up" => Some(Cmd::MoveUp),
-            "move-down" => Some(Cmd::MoveDown),
-            "move-left" => Some(Cmd::MoveLeft),
-            "move-right" => Some(Cmd::MoveRight),
+            "left-click" => Some(Cmd::Click(Button::Left)),
+            "right-click" => Some(Cmd::Click(Button::Right)),
+            "middle-click" => Some(Cmd::Click(Button::Middle)),
+            "cut-up" => Some(Cmd::Cut(Direction::Up)),
+            "cut-down" => Some(Cmd::Cut(Direction::Down)),
+            "cut-left" => Some(Cmd::Cut(Direction::Left)),
+            "cut-right" => Some(Cmd::Cut(Direction::Right)),
+            "move-up" => Some(Cmd::Move(Direction::Up)),
+            "move-down" => Some(Cmd::Move(Direction::Down)),
+            "move-left" => Some(Cmd::Move(Direction::Left)),
+            "move-right" => Some(Cmd::Move(Direction::Right)),
             _ => None,
         }
     }
@@ -484,24 +491,32 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                                 surface.region = region;
                             }
                         }
-                        Some(Cmd::CutLeft) => update(surface, output, Region::cut_left),
-                        Some(Cmd::CutDown) => update(surface, output, Region::cut_down),
-                        Some(Cmd::CutUp) => update(surface, output, Region::cut_up),
-                        Some(Cmd::CutRight) => update(surface, output, Region::cut_right),
-                        Some(Cmd::MoveLeft) => update(surface, output, Region::move_left),
-                        Some(Cmd::MoveDown) => update(surface, output, Region::move_down),
-                        Some(Cmd::MoveUp) => update(surface, output, Region::move_up),
-                        Some(Cmd::MoveRight) => update(surface, output, Region::move_right),
-                        Some(Cmd::LeftClick) => {
-                            should_click = Some(BTN_LEFT);
-                            state.will_quit = true;
-                        }
-                        Some(Cmd::RightClick) => {
-                            should_click = Some(BTN_RIGHT);
-                            state.will_quit = true;
-                        }
-                        Some(Cmd::MiddleClick) => {
-                            should_click = Some(BTN_MIDDLE);
+                        Some(Cmd::Cut(dir)) => update(
+                            surface,
+                            output,
+                            match dir {
+                                Direction::Up => Region::cut_up,
+                                Direction::Down => Region::cut_down,
+                                Direction::Left => Region::cut_left,
+                                Direction::Right => Region::cut_right,
+                            },
+                        ),
+                        Some(Cmd::Move(dir)) => update(
+                            surface,
+                            output,
+                            match dir {
+                                Direction::Up => Region::move_up,
+                                Direction::Down => Region::move_down,
+                                Direction::Left => Region::move_left,
+                                Direction::Right => Region::move_right,
+                            },
+                        ),
+                        Some(Cmd::Click(btn)) => {
+                            should_click = Some(match btn {
+                                Button::Left => BTN_LEFT,
+                                Button::Right => BTN_RIGHT,
+                                Button::Middle => BTN_MIDDLE,
+                            });
                             state.will_quit = true;
                         }
                         None => {}
