@@ -6,8 +6,7 @@ use anyhow::{bail, ensure, Context as _, Result};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
-    cell::OnceCell,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::Write,
     os::fd::{AsRawFd, IntoRawFd},
     path::PathBuf,
@@ -77,6 +76,8 @@ enum Cmd {
     Quit,
     Undo,
     Click(Button),
+    Press(Button),
+    Release(Button),
     Cut(Direction),
     Move(Direction),
 }
@@ -108,9 +109,11 @@ struct Region {
 
 struct Seat {
     wl_seat: Option<WlSeat>,
+    virtual_pointer: Option<ZwlrVirtualPointerV1>,
     xkb: xkb::Context,
     xkb_state: Option<xkb::State>,
     keyboard: Option<WlKeyboard>,
+    buttons_down: HashSet<u32>,
 }
 
 #[derive(Default)]
@@ -129,9 +132,8 @@ struct OutputState {
 #[derive(Default)]
 struct Surface {
     output: OutputId,
-    wl_surface: OnceCell<WlSurface>,
-    layer_surface: OnceCell<ZwlrLayerSurfaceV1>,
-    virtual_pointer: OnceCell<ZwlrVirtualPointerV1>,
+    wl_surface: Option<WlSurface>,
+    layer_surface: Option<ZwlrLayerSurfaceV1>,
     width: u32,
     height: u32,
     region: Region,
@@ -164,9 +166,11 @@ impl Seat {
     fn default() -> Seat {
         Seat {
             wl_seat: None,
+            virtual_pointer: None,
             xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
             xkb_state: None,
             keyboard: None,
+            buttons_down: HashSet::new(),
         }
     }
 }
@@ -179,6 +183,12 @@ impl Cmd {
             "left-click" => Some(Cmd::Click(Button::Left)),
             "right-click" => Some(Cmd::Click(Button::Right)),
             "middle-click" => Some(Cmd::Click(Button::Middle)),
+            "left-press" => Some(Cmd::Press(Button::Left)),
+            "right-press" => Some(Cmd::Press(Button::Right)),
+            "middle-press" => Some(Cmd::Press(Button::Middle)),
+            "left-release" => Some(Cmd::Release(Button::Left)),
+            "right-release" => Some(Cmd::Release(Button::Right)),
+            "middle-release" => Some(Cmd::Release(Button::Middle)),
             "cut-up" => Some(Cmd::Cut(Direction::Up)),
             "cut-down" => Some(Cmd::Cut(Direction::Down)),
             "cut-left" => Some(Cmd::Cut(Direction::Left)),
@@ -493,7 +503,8 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         break;
                     };
                     let output = &mut state.outputs[surface.output];
-                    let mut should_click = None;
+                    let mut should_press = None;
+                    let mut should_release = None;
                     let keysym_name = xkb::keysym_get_name(sym);
                     match state.config.bindings.get(&keysym_name) {
                         Some(Cmd::Quit) => {
@@ -525,12 +536,28 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                             },
                         ),
                         Some(Cmd::Click(btn)) => {
-                            should_click = Some(match btn {
+                            let code = match btn {
+                                Button::Left => BTN_LEFT,
+                                Button::Right => BTN_RIGHT,
+                                Button::Middle => BTN_MIDDLE,
+                            };
+                            should_press = Some(code);
+                            should_release = Some(code);
+                            state.will_quit = true;
+                        }
+                        Some(Cmd::Press(btn)) => {
+                            should_press = Some(match btn {
                                 Button::Left => BTN_LEFT,
                                 Button::Right => BTN_RIGHT,
                                 Button::Middle => BTN_MIDDLE,
                             });
-                            state.will_quit = true;
+                        }
+                        Some(Cmd::Release(btn)) => {
+                            should_release = Some(match btn {
+                                Button::Left => BTN_LEFT,
+                                Button::Right => BTN_RIGHT,
+                                Button::Middle => BTN_MIDDLE,
+                            });
                         }
                         None => {}
                     }
@@ -543,7 +570,7 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         output.state.current.as_ref().unwrap().scale,
                         surface,
                     );
-                    let virtual_pointer = &surface.virtual_pointer.get().unwrap();
+                    let virtual_pointer = &this.virtual_pointer.as_ref().unwrap();
                     virtual_pointer.motion_absolute(
                         0,
                         surface.region.center().x,
@@ -552,11 +579,17 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         surface.height,
                     );
                     virtual_pointer.frame();
-                    if let Some(btn) = should_click {
-                        virtual_pointer.button(0, btn, ButtonState::Pressed);
-                        virtual_pointer.frame();
-                        virtual_pointer.button(0, btn, ButtonState::Released);
-                        virtual_pointer.frame();
+                    if let Some(btn) = should_press {
+                        if this.buttons_down.insert(btn) {
+                            virtual_pointer.button(0, btn, ButtonState::Pressed);
+                            virtual_pointer.frame();
+                        }
+                    }
+                    if let Some(btn) = should_release {
+                        if this.buttons_down.remove(&btn) {
+                            virtual_pointer.button(0, btn, ButtonState::Released);
+                            virtual_pointer.frame();
+                        }
                     }
                 }
             }
@@ -720,7 +753,7 @@ fn draw(
     scale: u32,
     this: &mut Surface,
 ) {
-    let wl_surface = this.wl_surface.get().unwrap();
+    let wl_surface = this.wl_surface.as_ref().unwrap();
     let buffer_data = make_buffer(
         globals,
         buffers,
@@ -890,6 +923,12 @@ fn main() -> Result<()> {
                         &qhandle,
                         seat_id,
                     );
+                    app.seats[seat_id].virtual_pointer =
+                        Some(app.globals.virtual_pointer_manager.create_virtual_pointer(
+                            Some(&wl_seat),
+                            &qhandle,
+                            (),
+                        ));
                     app.seats[seat_id].wl_seat = Some(wl_seat);
                 }
                 "wl_output" => {
@@ -931,17 +970,19 @@ fn main() -> Result<()> {
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         surface.commit();
-        let virtual_pointer =
-            app.globals
-                .virtual_pointer_manager
-                .create_virtual_pointer(None, &qhandle, ());
         this.output = output_id;
-        this.wl_surface.set(surface).unwrap();
-        this.layer_surface.set(layer_surface).unwrap();
-        this.virtual_pointer.set(virtual_pointer).unwrap();
+        this.wl_surface = Some(surface);
+        this.layer_surface = Some(layer_surface);
     }
     while !app.will_quit {
         queue.blocking_dispatch(&mut app)?;
+    }
+    for seat in app.seats.iter() {
+        for &button in &seat.buttons_down {
+            let virtual_pointer = seat.virtual_pointer.as_ref().unwrap();
+            virtual_pointer.button(0, button, ButtonState::Released);
+            virtual_pointer.frame();
+        }
     }
     queue.flush()?;
     Ok(())
