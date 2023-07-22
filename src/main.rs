@@ -4,6 +4,7 @@ mod scfg;
 
 use anyhow::{bail, ensure, Context as _, Result};
 use bitflags::bitflags;
+use bytemuck::{Pod, Zeroable};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -42,7 +43,6 @@ use wayland_protocols_wlr::{
     },
 };
 use xkbcommon::xkb;
-use bytemuck::{Pod, Zeroable};
 
 type SeatId = TypedHandle<Seat>;
 type OutputId = TypedHandle<Output>;
@@ -1041,7 +1041,7 @@ fn specialize_bindings(
 
             let mod_mask: xkb::ModMask = modifiers
                 .into_iter()
-                .map(|modifier| 1 << mod_index_array[usize::from(modifier.bits())])
+                .map(|modifier| 1 << mod_index_array[modifier.bits().trailing_zeros() as usize])
                 .fold(0, |acc, it| acc | it);
 
             keycodes
