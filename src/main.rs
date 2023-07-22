@@ -10,7 +10,6 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     io::Write,
-    ops::Index,
     os::fd::{AsRawFd, IntoRawFd},
     path::PathBuf,
 };
@@ -43,6 +42,7 @@ use wayland_protocols_wlr::{
     },
 };
 use xkbcommon::xkb;
+use bytemuck::{Pod, Zeroable};
 
 type SeatId = TypedHandle<Seat>;
 type OutputId = TypedHandle<Output>;
@@ -99,7 +99,8 @@ bitflags! {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone, Copy)]
+#[repr(C)] // Note: implements Zeroable and Pod
 struct ModIndices {
     shift: xkb::ModIndex,
     caps: xkb::ModIndex,
@@ -183,6 +184,9 @@ struct DoubleBuffered<T> {
     pending: T,
     current: Option<T>,
 }
+
+unsafe impl Zeroable for ModIndices {}
+unsafe impl Pod for ModIndices {}
 
 impl<T: Clone> DoubleBuffered<T> {
     fn commit(&mut self) {
@@ -460,26 +464,6 @@ impl Output {
             height: current.height,
         }
         .inverse_scale(current.scale)
-    }
-}
-
-impl Index<Mods> for ModIndices {
-    type Output = xkb::ModIndex;
-
-    fn index(&self, index: Mods) -> &xkb::ModIndex {
-        match index {
-            Mods::SHIFT => &self.shift,
-            Mods::CAPS => &self.caps,
-            Mods::CTRL => &self.ctrl,
-            Mods::ALT => &self.alt,
-            Mods::NUM => &self.num,
-            Mods::MOD3 => &self.mod3,
-            Mods::LOGO => &self.logo,
-            Mods::MOD5 => &self.mod5,
-            _ => {
-                panic!("can only index by single modifier")
-            }
-        }
     }
 }
 
@@ -1053,9 +1037,11 @@ fn specialize_bindings(
                 }
             });
 
+            let mod_index_array: &[xkb::ModMask; 8] = bytemuck::cast_ref(&mod_indices);
+
             let mod_mask: xkb::ModMask = modifiers
                 .into_iter()
-                .map(|modifier| 1 << mod_indices[modifier])
+                .map(|modifier| 1 << mod_index_array[usize::from(modifier.bits())])
                 .fold(0, |acc, it| acc | it);
 
             keycodes

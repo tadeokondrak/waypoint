@@ -392,6 +392,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bitflags 2.3.3",
+ "bytemuck",
  "expect-test",
  "handy",
  "memfd",
