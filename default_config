@@ -2,27 +2,26 @@
 # User config is usually at ~/.config/waypoint/config
 
 bindings {
-    Escape quit
-    Return left-click
+    escape quit
+    return left-click
 
     h cut-left
     j cut-down
     k cut-up
     l cut-right
 
-    Left cut-left
-    Down cut-down
-    Up cut-up
-    Right cut-right
+    left cut-left
+    down cut-down
+    up cut-up
+    right cut-right
 
-    H move-left
-    J move-down
-    K move-up
-    L move-right
+    shift+h move-left
+    shift+j move-down
+    shift+k move-up
+    shift+l move-right
 
-    # These don't work yet.
-    Shift+Left move-left
-    Shift+Down move-down
-    Shift+Up move-up
-    Shift+Right move-right
+    shift+left move-left
+    shift+down move-down
+    shift+up move-up
+    shift+right move-right
 }

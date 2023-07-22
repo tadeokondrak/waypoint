@@ -3,11 +3,14 @@
 mod scfg;
 
 use anyhow::{bail, ensure, Context as _, Result};
+use bitflags::bitflags;
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     io::Write,
+    ops::Index,
     os::fd::{AsRawFd, IntoRawFd},
     path::PathBuf,
 };
@@ -82,8 +85,34 @@ enum Cmd {
     Move(Direction),
 }
 
+bitflags! {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    struct Mods: u8 {
+        const SHIFT = 1 << 0;
+        const CAPS = 1 << 1;
+        const CTRL = 1 << 2;
+        const ALT = 1 << 3;
+        const NUM = 1 << 4;
+        const MOD3 = 1 << 5;
+        const LOGO = 1 << 6;
+        const MOD5 = 1 << 7;
+    }
+}
+
+#[derive(Default)]
+struct ModIndices {
+    shift: xkb::ModIndex,
+    caps: xkb::ModIndex,
+    ctrl: xkb::ModIndex,
+    alt: xkb::ModIndex,
+    num: xkb::ModIndex,
+    mod3: xkb::ModIndex,
+    logo: xkb::ModIndex,
+    mod5: xkb::ModIndex,
+}
+
 struct Config {
-    bindings: HashMap<String, Cmd>,
+    bindings: HashMap<(Mods, xkb::Keysym), Cmd>,
 }
 
 struct Globals {
@@ -114,6 +143,8 @@ struct Seat {
     xkb_state: Option<xkb::State>,
     keyboard: Option<WlKeyboard>,
     buttons_down: HashSet<u32>,
+    mod_indices: ModIndices,
+    specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Cmd>,
 }
 
 #[derive(Default)]
@@ -162,6 +193,37 @@ impl<T: Clone> DoubleBuffered<T> {
     }
 }
 
+impl Mods {
+    fn one_from_str(s: &str) -> Option<Mods> {
+        fn strcasecmp(left: &str, right: &str) -> Ordering {
+            left.bytes()
+                .zip(right.bytes())
+                .map(|(l, r)| l.to_ascii_lowercase().cmp(&r.to_ascii_lowercase()))
+                .find(|&o| o != Ordering::Equal)
+                .unwrap_or_else(|| left.len().cmp(&right.len()))
+        }
+
+        let pairs_sorted = [
+            ("alt", Mods::ALT),
+            ("caps", Mods::CAPS),
+            ("ctrl", Mods::CTRL),
+            ("logo", Mods::LOGO),
+            ("mod3", Mods::MOD3),
+            ("mod5", Mods::MOD5),
+            ("num", Mods::NUM),
+            ("shift", Mods::SHIFT),
+        ];
+
+        let i = pairs_sorted
+            .binary_search_by(|&(name, _)| strcasecmp(name, s))
+            .ok()?;
+
+        let (_, modifier) = pairs_sorted[i];
+
+        Some(modifier)
+    }
+}
+
 impl Seat {
     fn default() -> Seat {
         Seat {
@@ -171,6 +233,8 @@ impl Seat {
             xkb_state: None,
             keyboard: None,
             buttons_down: HashSet::new(),
+            mod_indices: ModIndices::default(),
+            specialized_bindings: HashMap::new(),
         }
     }
 }
@@ -242,7 +306,7 @@ impl Config {
                             binding.line,
                         );
 
-                        let key = &binding.name;
+                        let keys = &binding.name;
                         let cmd = &binding.params[0];
 
                         let Some(cmd) = Cmd::from_kebab_case(cmd) else {
@@ -253,7 +317,46 @@ impl Config {
                             );
                         };
 
-                        bindings.insert(key.clone(), cmd);
+                        let mut modifiers = Mods::empty();
+                        let mut keysym = None;
+
+                        for element in keys.split('+') {
+                            match Mods::one_from_str(element) {
+                                Some(modifier) => {
+                                    let old_modifiers = modifiers;
+                                    modifiers |= modifier;
+                                    ensure!(
+                                        old_modifiers != modifiers,
+                                        "invalid config: line {}: duplicate modifier {:?}",
+                                        binding.line,
+                                        element,
+                                    );
+                                }
+                                None => {
+                                    let parsed_keysym = xkb::keysym_from_name(
+                                        element,
+                                        xkb::KEYSYM_CASE_INSENSITIVE,
+                                    );
+                                    ensure!(
+                                        parsed_keysym != xkb::KEY_NoSymbol,
+                                        "invalid config: line {}: invalid key {:?}",
+                                        binding.line,
+                                        element,
+                                    );
+                                    ensure!(
+                                        keysym.is_none(),
+                                        "invalid config: line {}: too many keys",
+                                        binding.line,
+                                    );
+                                    keysym = Some(parsed_keysym);
+                                }
+                            }
+                        }
+
+                        let keysym = keysym
+                            .context(format!("invalid config: line {}: no key", binding.line))?;
+
+                        bindings.insert((modifiers, keysym), cmd);
                     }
                 }
                 _ => {
@@ -360,6 +463,26 @@ impl Output {
     }
 }
 
+impl Index<Mods> for ModIndices {
+    type Output = xkb::ModIndex;
+
+    fn index(&self, index: Mods) -> &xkb::ModIndex {
+        match index {
+            Mods::SHIFT => &self.shift,
+            Mods::CAPS => &self.caps,
+            Mods::CTRL => &self.ctrl,
+            Mods::ALT => &self.alt,
+            Mods::NUM => &self.num,
+            Mods::MOD3 => &self.mod3,
+            Mods::LOGO => &self.logo,
+            Mods::MOD5 => &self.mod5,
+            _ => {
+                panic!("can only index by single modifier")
+            }
+        }
+    }
+}
+
 macro_rules! empty_dispatch {
     ($($t:ty),*) => {
         $(
@@ -461,6 +584,8 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     .flatten();
                     if let Some(keymap) = keymap.as_ref() {
                         this.xkb_state = Some(xkb::State::new(keymap));
+                        (this.mod_indices, this.specialized_bindings) =
+                            specialize_bindings(keymap, &state.config.bindings);
                     }
                 }
                 WEnum::Value(_) | WEnum::Unknown(_) => {}
@@ -492,104 +617,119 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 const BTN_LEFT: u32 = 0x110;
                 const BTN_RIGHT: u32 = 0x111;
                 const BTN_MIDDLE: u32 = 0x112;
-                let Some(xkb_state) = this.xkb_state.as_mut() else {
-                    return;
-                };
+
                 if key_state != WEnum::Value(KeyState::Pressed) {
                     return;
                 }
-                for sym in xkb_state.key_get_syms(key + 8).iter().copied() {
-                    let Some(surface) = state.surface.as_mut() else {
-                        break;
+
+                let Some(surface) = state.surface.as_mut() else {
+                    return;
+                };
+
+                let keycode = key + 8;
+                let mod_mask = {
+                    let Some(xkb_state) = this.xkb_state.as_mut() else {
+                        return;
                     };
-                    let output = &mut state.outputs[surface.output];
-                    let mut should_press = None;
-                    let mut should_release = None;
-                    let keysym_name = xkb::keysym_get_name(sym);
-                    match state.config.bindings.get(&keysym_name) {
-                        Some(Cmd::Quit) => {
-                            state.will_quit = true;
+                    let keymap = xkb_state.get_keymap();
+                    let mut mod_mask: xkb::ModMask = 0;
+                    for i in 0..keymap.num_mods() {
+                        let is_active = xkb_state.mod_index_is_active(i, xkb::STATE_MODS_EFFECTIVE);
+                        let _is_consumed = xkb_state.mod_index_is_consumed(key, i);
+                        let is_relevant = i != this.mod_indices.caps && i != this.mod_indices.num;
+                        if is_active && is_relevant {
+                            mod_mask |= 1 << i;
                         }
-                        Some(Cmd::Undo) => {
-                            if let Some(region) = surface.region_history.pop() {
-                                surface.region = region;
-                            }
-                        }
-                        Some(Cmd::Cut(dir)) => update(
-                            surface,
-                            output,
-                            match dir {
-                                Direction::Up => Region::cut_up,
-                                Direction::Down => Region::cut_down,
-                                Direction::Left => Region::cut_left,
-                                Direction::Right => Region::cut_right,
-                            },
-                        ),
-                        Some(Cmd::Move(dir)) => update(
-                            surface,
-                            output,
-                            match dir {
-                                Direction::Up => Region::move_up,
-                                Direction::Down => Region::move_down,
-                                Direction::Left => Region::move_left,
-                                Direction::Right => Region::move_right,
-                            },
-                        ),
-                        Some(Cmd::Click(btn)) => {
-                            let code = match btn {
-                                Button::Left => BTN_LEFT,
-                                Button::Right => BTN_RIGHT,
-                                Button::Middle => BTN_MIDDLE,
-                            };
-                            should_press = Some(code);
-                            should_release = Some(code);
-                            state.will_quit = true;
-                        }
-                        Some(Cmd::Press(btn)) => {
-                            should_press = Some(match btn {
-                                Button::Left => BTN_LEFT,
-                                Button::Right => BTN_RIGHT,
-                                Button::Middle => BTN_MIDDLE,
-                            });
-                        }
-                        Some(Cmd::Release(btn)) => {
-                            should_release = Some(match btn {
-                                Button::Left => BTN_LEFT,
-                                Button::Right => BTN_RIGHT,
-                                Button::Middle => BTN_MIDDLE,
-                            });
-                        }
-                        None => {}
                     }
-                    draw(
-                        &state.globals,
-                        &mut state.buffers,
-                        qhandle,
-                        surface.width,
-                        surface.height,
-                        output.state.current.as_ref().unwrap().scale,
+                    mod_mask
+                };
+
+                let output = &mut state.outputs[surface.output];
+                let mut should_press = None;
+                let mut should_release = None;
+                match this.specialized_bindings.get(&(mod_mask, keycode)) {
+                    Some(Cmd::Quit) => {
+                        state.will_quit = true;
+                    }
+                    Some(Cmd::Undo) => {
+                        if let Some(region) = surface.region_history.pop() {
+                            surface.region = region;
+                        }
+                    }
+                    Some(Cmd::Cut(dir)) => update(
                         surface,
-                    );
-                    let virtual_pointer = &this.virtual_pointer.as_ref().unwrap();
-                    virtual_pointer.motion_absolute(
-                        0,
-                        surface.region.center().x,
-                        surface.region.center().y,
-                        surface.width,
-                        surface.height,
-                    );
-                    virtual_pointer.frame();
-                    if let Some(btn) = should_press {
-                        if this.buttons_down.insert(btn) {
-                            virtual_pointer.button(0, btn, ButtonState::Pressed);
-                            virtual_pointer.frame();
-                        }
+                        output,
+                        match dir {
+                            Direction::Up => Region::cut_up,
+                            Direction::Down => Region::cut_down,
+                            Direction::Left => Region::cut_left,
+                            Direction::Right => Region::cut_right,
+                        },
+                    ),
+                    Some(Cmd::Move(dir)) => update(
+                        surface,
+                        output,
+                        match dir {
+                            Direction::Up => Region::move_up,
+                            Direction::Down => Region::move_down,
+                            Direction::Left => Region::move_left,
+                            Direction::Right => Region::move_right,
+                        },
+                    ),
+                    Some(Cmd::Click(btn)) => {
+                        let code = match btn {
+                            Button::Left => BTN_LEFT,
+                            Button::Right => BTN_RIGHT,
+                            Button::Middle => BTN_MIDDLE,
+                        };
+                        should_press = Some(code);
+                        should_release = Some(code);
+                        state.will_quit = true;
                     }
-                    if let Some(btn) = should_release {
-                        if this.buttons_down.remove(&btn) {
-                            virtual_pointer.button(0, btn, ButtonState::Released);
-                            virtual_pointer.frame();
-                        }
+                    Some(Cmd::Press(btn)) => {
+                        should_press = Some(match btn {
+                            Button::Left => BTN_LEFT,
+                            Button::Right => BTN_RIGHT,
+                            Button::Middle => BTN_MIDDLE,
+                        });
+                    }
+                    Some(Cmd::Release(btn)) => {
+                        should_release = Some(match btn {
+                            Button::Left => BTN_LEFT,
+                            Button::Right => BTN_RIGHT,
+                            Button::Middle => BTN_MIDDLE,
+                        });
+                    }
+                    None => {}
+                }
+                draw(
+                    &state.globals,
+                    &mut state.buffers,
+                    qhandle,
+                    surface.width,
+                    surface.height,
+                    output.state.current.as_ref().unwrap().scale,
+                    surface,
+                );
+                let virtual_pointer = &this.virtual_pointer.as_ref().unwrap();
+                virtual_pointer.motion_absolute(
+                    0,
+                    surface.region.center().x,
+                    surface.region.center().y,
+                    surface.width,
+                    surface.height,
+                );
+                virtual_pointer.frame();
+                if let Some(btn) = should_press {
+                    if this.buttons_down.insert(btn) {
+                        virtual_pointer.button(0, btn, ButtonState::Pressed);
+                        virtual_pointer.frame();
+                    }
+                }
+                if let Some(btn) = should_release {
+                    if this.buttons_down.remove(&btn) {
+                        virtual_pointer.button(0, btn, ButtonState::Released);
+                        virtual_pointer.frame();
                     }
                 }
             }
@@ -885,6 +1025,48 @@ fn make_buffer(
     Ok(buffer_id)
 }
 
+fn specialize_bindings(
+    keymap: &xkb::Keymap,
+    bindings: &HashMap<(Mods, xkb::Keysym), Cmd>,
+) -> (ModIndices, HashMap<(xkb::ModMask, xkb::Keycode), Cmd>) {
+    let state = xkb::State::new(keymap);
+    let mod_indices = ModIndices {
+        shift: keymap.mod_get_index(xkb::MOD_NAME_SHIFT),
+        caps: keymap.mod_get_index(xkb::MOD_NAME_CAPS),
+        ctrl: keymap.mod_get_index(xkb::MOD_NAME_CTRL),
+        alt: keymap.mod_get_index(xkb::MOD_NAME_ALT),
+        num: keymap.mod_get_index(xkb::MOD_NAME_NUM),
+        mod3: keymap.mod_get_index("Mod3"),
+        logo: keymap.mod_get_index(xkb::MOD_NAME_LOGO),
+        mod5: keymap.mod_get_index("Mod5"),
+    };
+
+    let specialized = bindings
+        .iter()
+        .flat_map(|(&(modifiers, keysym), &cmd)| {
+            let mut keycodes = Vec::new();
+
+            keymap.key_for_each(|_, keycode| {
+                let got_keysym = state.key_get_one_sym(keycode);
+                if got_keysym != xkb::KEY_NoSymbol && got_keysym == keysym {
+                    keycodes.push(keycode);
+                }
+            });
+
+            let mod_mask: xkb::ModMask = modifiers
+                .into_iter()
+                .map(|modifier| 1 << mod_indices[modifier])
+                .fold(0, |acc, it| acc | it);
+
+            keycodes
+                .into_iter()
+                .map(move |keycode| ((mod_mask, keycode), cmd))
+        })
+        .collect();
+
+    (mod_indices, specialized)
+}
+
 fn main() -> Result<()> {
     let conn = Connection::connect_to_env()?;
     let (global_list, mut queue) = registry_queue_init::<App>(&conn)?;
@@ -991,4 +1173,38 @@ fn main() -> Result<()> {
     }
     queue.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_one_modifier_from_str() {
+        #[track_caller]
+        fn check(s: &str, expected: Option<Mods>) {
+            assert_eq!(Mods::one_from_str(s), expected);
+        }
+
+        check("alt", Some(Mods::ALT));
+        check("ALT", Some(Mods::ALT));
+        check("Alt", Some(Mods::ALT));
+        check("Alt-", None);
+        check("None", None);
+
+        for modifier_name in [
+            "shift", "caps", "ctrl", "alt", "num", "mod3", "logo", "mod5",
+        ] {
+            #[track_caller]
+            fn check(modifier_name: &str, input: &str) {
+                assert_eq!(
+                    format!("{:?}", Mods::one_from_str(input).unwrap()),
+                    format!("Modifiers({})", modifier_name.to_uppercase()),
+                );
+            }
+
+            check(modifier_name, modifier_name);
+            check(modifier_name, &modifier_name.to_uppercase());
+        }
+    }
 }

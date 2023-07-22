@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.70"
+bitflags = "2.3.3"
 expect-test = "1.4.1"
 handy = "0.1.4"
 memfd = "0.6.3"
