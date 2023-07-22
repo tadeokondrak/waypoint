@@ -188,6 +188,20 @@ struct DoubleBuffered<T> {
 unsafe impl Zeroable for ModIndices {}
 unsafe impl Pod for ModIndices {}
 
+impl Button {
+    fn code(self) -> u32 {
+        const BTN_LEFT: u32 = 0x110;
+        const BTN_RIGHT: u32 = 0x111;
+        const BTN_MIDDLE: u32 = 0x112;
+
+        match self {
+            Button::Left => BTN_LEFT,
+            Button::Right => BTN_RIGHT,
+            Button::Middle => BTN_MIDDLE,
+        }
+    }
+}
+
 impl<T: Clone> DoubleBuffered<T> {
     fn commit(&mut self) {
         match self.current.as_mut() {
@@ -598,10 +612,6 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     }
                 }
 
-                const BTN_LEFT: u32 = 0x110;
-                const BTN_RIGHT: u32 = 0x111;
-                const BTN_MIDDLE: u32 = 0x112;
-
                 if key_state != WEnum::Value(KeyState::Pressed) {
                     return;
                 }
@@ -661,28 +671,15 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                         },
                     ),
                     Some(Cmd::Click(btn)) => {
-                        let code = match btn {
-                            Button::Left => BTN_LEFT,
-                            Button::Right => BTN_RIGHT,
-                            Button::Middle => BTN_MIDDLE,
-                        };
-                        should_press = Some(code);
-                        should_release = Some(code);
+                        should_press = Some(btn.code());
+                        should_release = Some(btn.code());
                         state.will_quit = true;
                     }
                     Some(Cmd::Press(btn)) => {
-                        should_press = Some(match btn {
-                            Button::Left => BTN_LEFT,
-                            Button::Right => BTN_RIGHT,
-                            Button::Middle => BTN_MIDDLE,
-                        });
+                        should_press = Some(btn.code());
                     }
                     Some(Cmd::Release(btn)) => {
-                        should_release = Some(match btn {
-                            Button::Left => BTN_LEFT,
-                            Button::Right => BTN_RIGHT,
-                            Button::Middle => BTN_MIDDLE,
-                        });
+                        should_release = Some(btn.code());
                     }
                     None => {}
                 }
