@@ -836,16 +836,21 @@ impl Dispatch<WlShmPool, BufferId> for App {
 
 impl Dispatch<WlBuffer, BufferId> for App {
     fn event(
-        _state: &mut Self,
+        state: &mut Self,
         _proxy: &WlBuffer,
         event: wl_buffer::Event,
-        _data: &BufferId,
+        &buffer_id: &BufferId,
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
         use wayland_client::protocol::wl_buffer::Event;
+        let this = &mut state.buffers[buffer_id];
         match event {
-            Event::Release => {}
+            Event::Release => {
+                this.pool.as_ref().unwrap().destroy();
+                this.wl_buffer.as_ref().unwrap().destroy();
+                state.buffers.remove(buffer_id);
+            }
             _ => {}
         }
     }
