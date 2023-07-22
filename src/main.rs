@@ -22,7 +22,7 @@ use wayland_client::{
         wl_compositor::WlCompositor,
         wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
         wl_output::{self, WlOutput},
-        wl_pointer::ButtonState,
+        wl_pointer::{Axis, ButtonState},
         wl_region::WlRegion,
         wl_registry::{self, WlRegistry},
         wl_seat::{self, Capability, WlSeat},
@@ -83,6 +83,7 @@ enum Cmd {
     Release(Button),
     Cut(Direction),
     Move(Direction),
+    Scroll(Axis, f64),
 }
 
 bitflags! {
@@ -279,6 +280,10 @@ impl Cmd {
             "move-down" => Some(Cmd::Move(Direction::Down)),
             "move-left" => Some(Cmd::Move(Direction::Left)),
             "move-right" => Some(Cmd::Move(Direction::Right)),
+            "scroll-up" => Some(Cmd::Scroll(Axis::VerticalScroll, -10.0)),
+            "scroll-down" => Some(Cmd::Scroll(Axis::VerticalScroll, 10.0)),
+            "scroll-left" => Some(Cmd::Scroll(Axis::HorizontalScroll, -10.0)),
+            "scroll-right" => Some(Cmd::Scroll(Axis::HorizontalScroll, 10.0)),
             _ => None,
         }
     }
@@ -641,7 +646,8 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 let output = &mut state.outputs[surface.output];
                 let mut should_press = None;
                 let mut should_release = None;
-                match this.specialized_bindings.get(&(mod_mask, keycode)) {
+                let mut should_scroll = Vec::new();
+                match this.specialized_bindings.get(&(mod_mask, keycode)).copied() {
                     Some(Cmd::Quit) => {
                         state.will_quit = true;
                     }
@@ -681,6 +687,9 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     Some(Cmd::Release(btn)) => {
                         should_release = Some(btn.code());
                     }
+                    Some(Cmd::Scroll(axis, amount)) => {
+                        should_scroll.push((axis, amount));
+                    }
                     None => {}
                 }
                 draw(
@@ -701,6 +710,10 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     surface.height,
                 );
                 virtual_pointer.frame();
+                for (axis, amount) in should_scroll {
+                    virtual_pointer.axis(0, axis, amount);
+                    virtual_pointer.frame();
+                }
                 if let Some(btn) = should_press {
                     if this.buttons_down.insert(btn) {
                         virtual_pointer.button(0, btn, ButtonState::Pressed);
