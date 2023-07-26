@@ -26,7 +26,7 @@ use wayland_client::{
         wl_registry::{self, WlRegistry},
         wl_seat::{self, Capability, WlSeat},
         wl_shm::{Format, WlShm},
-        wl_shm_pool::{self, WlShmPool},
+        wl_shm_pool::WlShmPool,
         wl_surface::{self, WlSurface},
     },
     Connection, Dispatch, QueueHandle, WEnum,
@@ -38,7 +38,7 @@ use wayland_protocols_wlr::{
     },
     virtual_pointer::v1::client::{
         zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-        zwlr_virtual_pointer_v1::{self, ZwlrVirtualPointerV1},
+        zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
     },
 };
 use xkbcommon::xkb;
@@ -278,9 +278,11 @@ macro_rules! empty_dispatch {
 
 empty_dispatch![
     WlShm,
+    WlShmPool,
     WlCompositor,
     WlRegion,
     ZwlrLayerShellV1,
+    ZwlrVirtualPointerV1,
     ZwlrVirtualPointerManagerV1
 ];
 
@@ -472,7 +474,8 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                     surface.height,
                     output.state.current.as_ref().unwrap().scale,
                     surface,
-                );
+                )
+                .unwrap();
                 let virtual_pointer = &this.virtual_pointer.as_ref().unwrap();
                 virtual_pointer.motion_absolute(
                     0,
@@ -625,26 +628,12 @@ impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
                     height,
                     output.state.current.as_ref().unwrap().scale,
                     this,
-                );
+                )
+                .unwrap();
             }
             Event::Closed => {
                 state.surface = None;
             }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwlrVirtualPointerV1, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &ZwlrVirtualPointerV1,
-        event: zwlr_virtual_pointer_v1::Event,
-        &(): &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        match event {
             _ => {}
         }
     }
@@ -658,7 +647,7 @@ fn draw(
     height: u32,
     scale: u32,
     this: &mut Surface,
-) {
+) -> Result<()> {
     let wl_surface = this.wl_surface.as_ref().unwrap();
     let buffer_data = make_buffer(
         globals,
@@ -668,82 +657,112 @@ fn draw(
         i32::try_from(height * scale).unwrap(),
         i32::try_from(width * scale * 4).unwrap(),
         Format::Argb8888,
-    )
-    .unwrap();
+    )?;
     let buffer = &mut buffers[buffer_data];
     let mut pixmap = tiny_skia::PixmapMut::from_bytes(
         buffer.mmap.as_deref_mut().unwrap(),
         width * scale,
         height * scale,
     )
-    .unwrap();
-    {
-        let region = this.region.scale(scale);
-        let mut path = PathBuilder::new();
-        let region_x = region.x as f32;
-        let region_y = region.y as f32;
-        let region_width = region.width as f32;
-        let region_height = region.height as f32;
-        path.move_to(region_x, region_y);
-        path.line_to(region_x + region_width, region_y);
-        path.line_to(region_x + region_width, region_y + region_height);
-        path.line_to(region_x, region_y + region_height);
-        path.close();
-        let path = path.finish().unwrap();
-        let paint = Paint {
-            shader: Shader::SolidColor(Color::WHITE),
-            ..Default::default()
-        };
-        let transform = Transform::default();
-        let stroke = Stroke {
-            width: 1.0,
-            ..Default::default()
-        };
-        _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
-
-        let mut path = path.clear();
-        path.move_to(region_x, region_y + region_height / 2.0);
-        path.line_to(region_x + region_width, region_y + region_height / 2.0);
-        path.close();
-        path.move_to(region_x + region_width / 2.0, region_y);
-        path.line_to(region_x + region_width / 2.0, region_y + region_height);
-        let path = path.finish().unwrap();
-        let mut paint = Paint::default();
+    .expect("PixmapMut creation failed");
+    let border_color = Color::WHITE;
+    let cross_color = {
         let mut color = Color::WHITE;
         color.apply_opacity(0.25);
-        paint.shader = Shader::SolidColor(color);
-        let transform = Transform::default();
-        let stroke = Stroke {
-            width: 2.0,
-            ..Default::default()
-        };
-        _ = pixmap.stroke_path(&path, &paint, &stroke, transform, None);
-    }
+        color
+    };
+    let border_thickness = 1.0;
+    let cross_thickness = 2.0;
+    draw_inner(
+        this.region,
+        scale,
+        &mut pixmap,
+        border_color,
+        border_thickness,
+        cross_color,
+        cross_thickness,
+    );
+    let wl_buffer = buffer.wl_buffer.as_ref().unwrap();
     wl_surface.set_buffer_scale(i32::try_from(scale).unwrap());
-    wl_surface.attach(Some(buffer.wl_buffer.as_ref().unwrap()), 0, 0);
+    wl_surface.attach(Some(wl_buffer), 0, 0);
     wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
     wl_surface.commit();
+
+    Ok(())
 }
 
-impl Dispatch<WlShmPool, BufferId> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlShmPool,
-        event: wl_shm_pool::Event,
-        _data: &BufferId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        match event {
-            _ => {}
-        }
-    }
+fn draw_inner(
+    region: Region,
+    scale: u32,
+    pixmap: &mut tiny_skia::PixmapMut<'_>,
+    border_color: Color,
+    border_thickness: f32,
+    cross_color: Color,
+    cross_thickness: f32,
+) {
+    let region = region.scale(scale);
+    let region_x = region.x as f32;
+    let region_y = region.y as f32;
+    let region_width = region.width as f32;
+    let region_height = region.height as f32;
+
+    let border_paint = Paint {
+        shader: Shader::SolidColor(border_color),
+        ..Default::default()
+    };
+
+    let border_stroke = Stroke {
+        width: border_thickness,
+        ..Default::default()
+    };
+
+    let cross_paint = Paint {
+        shader: Shader::SolidColor(cross_color),
+        ..Paint::default()
+    };
+
+    let cross_stroke = Stroke {
+        width: cross_thickness,
+        ..Default::default()
+    };
+
+    let mut path = PathBuilder::new();
+    path.move_to(region_x, region_y);
+    path.line_to(region_x + region_width, region_y);
+    path.line_to(region_x + region_width, region_y + region_height);
+    path.line_to(region_x, region_y + region_height);
+    path.close();
+    let path = path.finish().expect("invalid path created");
+
+    _ = pixmap.stroke_path(
+        &path,
+        &border_paint,
+        &border_stroke,
+        Transform::default(),
+        None,
+    );
+
+    let mut path = path.clear();
+    path.move_to(region_x, region_y + region_height / 2.0);
+    path.line_to(region_x + region_width, region_y + region_height / 2.0);
+    path.close();
+    path.move_to(region_x + region_width / 2.0, region_y);
+    path.line_to(region_x + region_width / 2.0, region_y + region_height);
+    let path = path.finish().expect("invalid path created");
+
+    _ = pixmap.stroke_path(
+        &path,
+        &cross_paint,
+        &cross_stroke,
+        Transform::default(),
+        None,
+    );
 }
 
 impl Dispatch<WlBuffer, BufferId> for App {
     fn event(
         state: &mut Self,
-        _proxy: &WlBuffer,
+        wl_buffer: &WlBuffer,
         event: wl_buffer::Event,
         &buffer_id: &BufferId,
         _conn: &Connection,
@@ -753,8 +772,9 @@ impl Dispatch<WlBuffer, BufferId> for App {
         let this = &mut state.buffers[buffer_id];
         match event {
             Event::Release => {
-                this.pool.as_ref().unwrap().destroy();
-                this.wl_buffer.as_ref().unwrap().destroy();
+                let wl_shm_pool = this.pool.as_ref().unwrap();
+                wl_shm_pool.destroy();
+                wl_buffer.destroy();
                 state.buffers.remove(buffer_id);
             }
             _ => {}
@@ -774,17 +794,14 @@ fn make_buffer(
     let buffer_id = buffers.insert(Buffer::default());
     let this = &mut buffers[buffer_id];
     let memfd = memfd::MemfdOptions::new().create("waypoint-buffer")?;
-    let len = stride * height;
-    memfd.as_file().write_all(&vec![0u8; len as usize])?;
+    let len_i32 = stride.checked_mul(height).expect("buffer too big");
+    let len_usize = usize::try_from(len_i32).expect("buffer too big");
+    memfd.as_file().write_all(&vec![0u8; len_i32 as usize])?;
     let pool = globals
         .wl_shm
-        .create_pool(memfd.as_raw_fd(), len, qhandle, buffer_id);
+        .create_pool(memfd.as_raw_fd(), len_i32, qhandle, ());
     let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, buffer_id);
-    let mmap = unsafe {
-        MmapOptions::new()
-            .len(usize::try_from(len).unwrap())
-            .map_mut(memfd.as_file())?
-    };
+    let mmap = unsafe { MmapOptions::new().len(len_usize).map_mut(memfd.as_file())? };
     this.pool = Some(pool);
     this.wl_buffer = Some(wl_buffer);
     this.mmap = Some(mmap);
@@ -825,28 +842,26 @@ fn main() -> Result<()> {
             version,
         } in list
         {
+            let registry = global_list.registry();
             match interface.as_str() {
                 "wl_seat" => {
                     let seat_id = app.seats.insert(Seat::default());
-                    let wl_seat =
-                        global_list
-                            .registry()
-                            .bind(name, version.max(1), &qhandle, seat_id);
-                    app.seats[seat_id].virtual_pointer =
-                        Some(app.globals.virtual_pointer_manager.create_virtual_pointer(
-                            Some(&wl_seat),
-                            &qhandle,
-                            (),
-                        ));
-                    app.seats[seat_id].wl_seat = Some(wl_seat);
+                    let wl_seat = registry.bind(name, version.max(1), &qhandle, seat_id);
+                    let seat = &mut app.seats[seat_id];
+                    let virtual_pointer_manager = &app.globals.virtual_pointer_manager;
+                    let virtual_pointer = virtual_pointer_manager.create_virtual_pointer(
+                        Some(&wl_seat),
+                        &qhandle,
+                        (),
+                    );
+                    seat.virtual_pointer = Some(virtual_pointer);
+                    seat.wl_seat = Some(wl_seat);
                 }
                 "wl_output" => {
                     let output_id = app.outputs.insert(Output::default());
-                    let wl_output =
-                        global_list
-                            .registry()
-                            .bind(name, version.max(1), &qhandle, output_id);
-                    app.outputs[output_id].wl_output = Some(wl_output);
+                    let output = &mut app.outputs[output_id];
+                    let wl_output = registry.bind(name, version.max(1), &qhandle, output_id);
+                    output.wl_output = Some(wl_output);
                 }
                 _ => {}
             }
@@ -861,12 +876,11 @@ fn main() -> Result<()> {
             .iter_with_handles()
             .next()
             .context("no outputs")?;
+        let wl_output = output.wl_output.as_ref().unwrap();
         let surface = app.globals.wl_compositor.create_surface(&qhandle, ());
-        let region = app.globals.wl_compositor.create_region(&qhandle, ());
-        surface.set_input_region(Some(&region));
         let layer_surface = app.globals.layer_shell.get_layer_surface(
             &surface,
-            Some(output.wl_output.as_ref().unwrap()),
+            Some(wl_output),
             Layer::Overlay,
             String::from("waypoint"),
             &qhandle,
@@ -876,6 +890,8 @@ fn main() -> Result<()> {
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        let region = app.globals.wl_compositor.create_region(&qhandle, ());
+        surface.set_input_region(Some(&region));
         surface.commit();
         this.output = output_id;
         this.wl_surface = Some(surface);
