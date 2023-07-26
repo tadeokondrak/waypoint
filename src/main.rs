@@ -793,7 +793,7 @@ fn make_buffer(
 
 fn main() -> Result<()> {
     let conn = Connection::connect_to_env()?;
-    let (global_list, mut queue) = registry_queue_init::<App>(&conn)?;
+    let (global_list, mut queue) = registry_queue_init(&conn)?;
     let qhandle = queue.handle();
     let mut app = App {
         will_quit: false,
@@ -828,12 +828,10 @@ fn main() -> Result<()> {
             match interface.as_str() {
                 "wl_seat" => {
                     let seat_id = app.seats.insert(Seat::default());
-                    let wl_seat = global_list.registry().bind::<WlSeat, SeatId, App>(
-                        name,
-                        version.max(1),
-                        &qhandle,
-                        seat_id,
-                    );
+                    let wl_seat =
+                        global_list
+                            .registry()
+                            .bind(name, version.max(1), &qhandle, seat_id);
                     app.seats[seat_id].virtual_pointer =
                         Some(app.globals.virtual_pointer_manager.create_virtual_pointer(
                             Some(&wl_seat),
@@ -844,12 +842,10 @@ fn main() -> Result<()> {
                 }
                 "wl_output" => {
                     let output_id = app.outputs.insert(Output::default());
-                    let wl_output = global_list.registry().bind::<WlOutput, OutputId, App>(
-                        name,
-                        version.max(1),
-                        &qhandle,
-                        output_id,
-                    );
+                    let wl_output =
+                        global_list
+                            .registry()
+                            .bind(name, version.max(1), &qhandle, output_id);
                     app.outputs[output_id].wl_output = Some(wl_output);
                 }
                 _ => {}
