@@ -301,7 +301,7 @@ mod tests {
             fn check(modifier_name: &str, input: &str) {
                 assert_eq!(
                     format!("{:?}", Mods::one_from_str(input).unwrap()),
-                    format!("Modifiers({})", modifier_name.to_uppercase()),
+                    format!("Mods({})", modifier_name.to_uppercase()),
                 );
             }
 
