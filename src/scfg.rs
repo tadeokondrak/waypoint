@@ -19,7 +19,11 @@ pub struct Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "line {}, column {}: expected {:?}", self.line, self.column, self.expected)
+        write!(
+            f,
+            "line {}, column {}: expected {:?}",
+            self.line, self.column, self.expected
+        )
     }
 }
 
