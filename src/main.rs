@@ -128,6 +128,24 @@ struct DoubleBuffered<T> {
     current: Option<T>,
 }
 
+macro_rules! empty_dispatch {
+    ($($t:ty),*) => {
+        $(
+            impl Dispatch<$t, ()> for App {
+                fn event(
+                    _: &mut Self,
+                    _: &$t,
+                    _: <$t as wayland_client::Proxy>::Event,
+                    _: &(),
+                    _: &Connection,
+                    _: &QueueHandle<Self>,
+                ) {
+                }
+            }
+        )*
+    };
+}
+
 unsafe impl Zeroable for ModIndices {}
 unsafe impl Pod for ModIndices {}
 
@@ -144,7 +162,6 @@ impl Default for Seat {
     fn default() -> Seat {
         Seat {
             xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-
             wl_seat: Default::default(),
             virtual_pointer: Default::default(),
             xkb_state: Default::default(),
@@ -169,389 +186,133 @@ impl Output {
     }
 }
 
-macro_rules! empty_dispatch {
-    ($($t:ty),*) => {
-        $(
-            impl Dispatch<$t, ()> for App {
-                fn event(
-                    _: &mut Self,
-                    _: &$t,
-                    _: <$t as wayland_client::Proxy>::Event,
-                    _: &(),
-                    _: &Connection,
-                    _: &QueueHandle<Self>,
-                ) {
-                }
-            }
-        )*
+fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &QueueHandle<App>) {
+    fn update(surface: &mut Surface, output: &mut Output, cut: fn(Region) -> Region) {
+        surface.region_history.push(surface.region);
+        let bounds = output.scaled_region();
+        let new_region = cut(surface.region);
+        if bounds.contains_region(&new_region) {
+            surface.region = new_region;
+        }
+    }
+
+    let Some(surface) = state.surface.as_mut() else {
+        return;
     };
-}
+    let seat = &mut state.seats[seat_id];
+    let output = &mut state.outputs[surface.output];
 
-empty_dispatch![
-    WlShm,
-    WlShmPool,
-    WlCompositor,
-    WlRegion,
-    ZwlrLayerShellV1,
-    ZwlrVirtualPointerV1,
-    ZwlrVirtualPointerManagerV1
-];
+    let keycode = key + 8;
+    let mod_mask = {
+        let Some(xkb_state) = seat.xkb_state.as_mut() else {
+            return;
+        };
+        let keymap = xkb_state.get_keymap();
+        let mut mod_mask: xkb::ModMask = 0;
+        for i in 0..keymap.num_mods() {
+            let is_active = xkb_state.mod_index_is_active(i, xkb::STATE_MODS_EFFECTIVE);
+            let _is_consumed = xkb_state.mod_index_is_consumed(key, i);
+            let is_relevant = i != seat.mod_indices.caps && i != seat.mod_indices.num;
+            if is_active && is_relevant {
+                mod_mask |= 1 << i;
+            }
+        }
+        mod_mask
+    };
 
-impl Dispatch<WlRegistry, GlobalListContents> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: wl_registry::Event,
-        _data: &GlobalListContents,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_registry::Event;
-        match _event {
-            Event::Global {
-                name: _,
-                interface: _,
-                version: _,
-            } => {}
-            Event::GlobalRemove { name: _ } => {}
-            _ => {}
+    let mut should_press = None;
+    let mut should_release = None;
+    let mut should_scroll = Vec::new();
+
+    for cmd in seat
+        .specialized_bindings
+        .get(&(mod_mask, keycode))
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        match *cmd {
+            Cmd::Quit => {
+                state.will_quit = true;
+            }
+            Cmd::Undo => {
+                if let Some(region) = surface.region_history.pop() {
+                    surface.region = region;
+                }
+            }
+            Cmd::Cut(dir) => update(
+                surface,
+                output,
+                match dir {
+                    Direction::Up => Region::cut_up,
+                    Direction::Down => Region::cut_down,
+                    Direction::Left => Region::cut_left,
+                    Direction::Right => Region::cut_right,
+                },
+            ),
+            Cmd::Move(dir) => update(
+                surface,
+                output,
+                match dir {
+                    Direction::Up => Region::move_up,
+                    Direction::Down => Region::move_down,
+                    Direction::Left => Region::move_left,
+                    Direction::Right => Region::move_right,
+                },
+            ),
+            Cmd::Click(btn) => {
+                should_press = Some(btn.code());
+                should_release = Some(btn.code());
+                state.will_quit = true;
+            }
+            Cmd::Press(btn) => {
+                should_press = Some(btn.code());
+            }
+            Cmd::Release(btn) => {
+                should_release = Some(btn.code());
+            }
+            Cmd::Scroll(axis, amount) => {
+                should_scroll.push((axis, amount));
+            }
         }
     }
-}
 
-impl Dispatch<WlSeat, SeatId> for App {
-    fn event(
-        state: &mut Self,
-        proxy: &WlSeat,
-        event: wl_seat::Event,
-        &data: &SeatId,
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_seat::Event;
-        let this = &mut state.seats[data];
-        match event {
-            Event::Capabilities { capabilities } => {
-                let WEnum::Value(v) = capabilities else {
-                    return;
-                };
-                if v.contains(Capability::Keyboard) {
-                    this.keyboard = Some(proxy.get_keyboard(qhandle, data));
-                }
-            }
-            Event::Name { name: _ } => {}
-            _ => {}
+    draw(
+        &state.globals,
+        &mut state.buffers,
+        qhandle,
+        surface.width,
+        surface.height,
+        output.state.current.as_ref().unwrap().scale,
+        surface,
+    )
+    .unwrap();
+
+    let virtual_pointer = &seat.virtual_pointer.as_ref().unwrap();
+    virtual_pointer.motion_absolute(
+        0,
+        surface.region.center().x,
+        surface.region.center().y,
+        surface.width,
+        surface.height,
+    );
+    virtual_pointer.frame();
+
+    for (axis, amount) in should_scroll {
+        virtual_pointer.axis(0, axis, amount);
+        virtual_pointer.frame();
+    }
+
+    if let Some(btn) = should_press {
+        if seat.buttons_down.insert(btn) {
+            virtual_pointer.button(0, btn, ButtonState::Pressed);
+            virtual_pointer.frame();
         }
     }
-}
 
-impl Dispatch<WlKeyboard, SeatId> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlKeyboard,
-        event: wl_keyboard::Event,
-        &data: &SeatId,
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_keyboard::Event;
-        let this = &mut state.seats[data];
-        match event {
-            Event::Keymap { format, fd, size } => match format {
-                WEnum::Value(KeymapFormat::XkbV1) => {
-                    let keymap = unsafe {
-                        xkb::Keymap::new_from_fd(
-                            &this.xkb,
-                            fd.into_raw_fd(),
-                            size as usize,
-                            xkb::KEYMAP_FORMAT_TEXT_V1,
-                            xkb::COMPILE_NO_FLAGS,
-                        )
-                    }
-                    .ok()
-                    .flatten();
-                    if let Some(keymap) = keymap.as_ref() {
-                        this.xkb_state = Some(xkb::State::new(keymap));
-                        (this.mod_indices, this.specialized_bindings) =
-                            specialize_bindings(keymap, &state.config);
-                    }
-                }
-                WEnum::Value(_) | WEnum::Unknown(_) => {}
-            },
-            Event::Enter {
-                serial: _,
-                surface: _,
-                keys: _,
-            } => {}
-            Event::Leave {
-                serial: _,
-                surface: _,
-            } => {}
-            Event::Key {
-                serial: _,
-                time: _,
-                key,
-                state: key_state,
-            } => {
-                fn update(surface: &mut Surface, output: &mut Output, cut: fn(Region) -> Region) {
-                    surface.region_history.push(surface.region);
-                    let bounds = output.scaled_region();
-                    let new_region = cut(surface.region);
-                    if bounds.contains_region(&new_region) {
-                        surface.region = new_region;
-                    }
-                }
-
-                if key_state != WEnum::Value(KeyState::Pressed) {
-                    return;
-                }
-
-                let Some(surface) = state.surface.as_mut() else {
-                    return;
-                };
-
-                let keycode = key + 8;
-                let mod_mask = {
-                    let Some(xkb_state) = this.xkb_state.as_mut() else {
-                        return;
-                    };
-                    let keymap = xkb_state.get_keymap();
-                    let mut mod_mask: xkb::ModMask = 0;
-                    for i in 0..keymap.num_mods() {
-                        let is_active = xkb_state.mod_index_is_active(i, xkb::STATE_MODS_EFFECTIVE);
-                        let _is_consumed = xkb_state.mod_index_is_consumed(key, i);
-                        let is_relevant = i != this.mod_indices.caps && i != this.mod_indices.num;
-                        if is_active && is_relevant {
-                            mod_mask |= 1 << i;
-                        }
-                    }
-                    mod_mask
-                };
-
-                let output = &mut state.outputs[surface.output];
-                let mut should_press = None;
-                let mut should_release = None;
-                let mut should_scroll = Vec::new();
-                for cmd in this
-                    .specialized_bindings
-                    .get(&(mod_mask, keycode))
-                    .map(Vec::as_slice)
-                    .unwrap_or_default()
-                {
-                    match *cmd {
-                        Cmd::Quit => {
-                            state.will_quit = true;
-                        }
-                        Cmd::Undo => {
-                            if let Some(region) = surface.region_history.pop() {
-                                surface.region = region;
-                            }
-                        }
-                        Cmd::Cut(dir) => update(
-                            surface,
-                            output,
-                            match dir {
-                                Direction::Up => Region::cut_up,
-                                Direction::Down => Region::cut_down,
-                                Direction::Left => Region::cut_left,
-                                Direction::Right => Region::cut_right,
-                            },
-                        ),
-                        Cmd::Move(dir) => update(
-                            surface,
-                            output,
-                            match dir {
-                                Direction::Up => Region::move_up,
-                                Direction::Down => Region::move_down,
-                                Direction::Left => Region::move_left,
-                                Direction::Right => Region::move_right,
-                            },
-                        ),
-                        Cmd::Click(btn) => {
-                            should_press = Some(btn.code());
-                            should_release = Some(btn.code());
-                            state.will_quit = true;
-                        }
-                        Cmd::Press(btn) => {
-                            should_press = Some(btn.code());
-                        }
-                        Cmd::Release(btn) => {
-                            should_release = Some(btn.code());
-                        }
-                        Cmd::Scroll(axis, amount) => {
-                            should_scroll.push((axis, amount));
-                        }
-                    }
-                }
-                draw(
-                    &state.globals,
-                    &mut state.buffers,
-                    qhandle,
-                    surface.width,
-                    surface.height,
-                    output.state.current.as_ref().unwrap().scale,
-                    surface,
-                )
-                .unwrap();
-                let virtual_pointer = &this.virtual_pointer.as_ref().unwrap();
-                virtual_pointer.motion_absolute(
-                    0,
-                    surface.region.center().x,
-                    surface.region.center().y,
-                    surface.width,
-                    surface.height,
-                );
-                virtual_pointer.frame();
-                for (axis, amount) in should_scroll {
-                    virtual_pointer.axis(0, axis, amount);
-                    virtual_pointer.frame();
-                }
-                if let Some(btn) = should_press {
-                    if this.buttons_down.insert(btn) {
-                        virtual_pointer.button(0, btn, ButtonState::Pressed);
-                        virtual_pointer.frame();
-                    }
-                }
-                if let Some(btn) = should_release {
-                    if this.buttons_down.remove(&btn) {
-                        virtual_pointer.button(0, btn, ButtonState::Released);
-                        virtual_pointer.frame();
-                    }
-                }
-            }
-            Event::Modifiers {
-                serial: _,
-                mods_depressed,
-                mods_latched,
-                mods_locked,
-                group,
-            } => {
-                this.xkb_state.as_mut().unwrap().update_mask(
-                    mods_depressed,
-                    mods_latched,
-                    mods_locked,
-                    0,
-                    0,
-                    group,
-                );
-            }
-            Event::RepeatInfo { rate: _, delay: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlOutput, OutputId> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlOutput,
-        event: wl_output::Event,
-        &data: &OutputId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_output::Event;
-        let this = &mut state.outputs[data];
-        match event {
-            Event::Geometry {
-                x: _,
-                y: _,
-                physical_width: _,
-                physical_height: _,
-                subpixel: _,
-                make: _,
-                model: _,
-                transform: _,
-            } => {}
-            Event::Mode {
-                flags,
-                width,
-                height,
-                refresh: _,
-            } => {
-                let WEnum::Value(flags) = flags else {
-                    return;
-                };
-                if flags.contains(wl_output::Mode::Current) {
-                    this.state.pending.width = u32::try_from(width).expect("negative output width");
-                    this.state.pending.height =
-                        u32::try_from(height).expect("negative output height");
-                }
-            }
-            Event::Done => {
-                this.state.commit();
-            }
-            Event::Scale { factor } => {
-                this.state.pending.scale = u32::try_from(factor).expect("negative scale factor");
-            }
-            Event::Name { name: _ } => {}
-            Event::Description { description: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlSurface, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlSurface,
-        event: wl_surface::Event,
-        &(): &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_surface::Event;
-        match event {
-            Event::Enter { output: _ } => {}
-            Event::Leave { output: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        &(): &(),
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use zwlr_layer_surface_v1::Event;
-        let this = &mut state.surface.as_mut().unwrap();
-        let output = &mut state.outputs[this.output];
-        match event {
-            Event::Configure {
-                serial,
-                width,
-                height,
-            } => {
-                proxy.ack_configure(serial);
-                proxy.set_size(width, height);
-                this.width = width;
-                this.height = height;
-                this.region = Region {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                };
-                draw(
-                    &state.globals,
-                    &mut state.buffers,
-                    qhandle,
-                    width,
-                    height,
-                    output.state.current.as_ref().unwrap().scale,
-                    this,
-                )
-                .unwrap();
-            }
-            Event::Closed => {
-                state.surface = None;
-            }
-            _ => {}
+    if let Some(btn) = should_release {
+        if seat.buttons_down.remove(&btn) {
+            virtual_pointer.button(0, btn, ButtonState::Released);
+            virtual_pointer.frame();
         }
     }
 }
@@ -635,7 +396,7 @@ fn draw_inner(
 
     let cross_paint = Paint {
         shader: Shader::SolidColor(cross_color),
-        ..Paint::default()
+        ..Default::default()
     };
 
     let cross_stroke = Stroke {
@@ -674,29 +435,6 @@ fn draw_inner(
         Transform::default(),
         None,
     );
-}
-
-impl Dispatch<WlBuffer, BufferId> for App {
-    fn event(
-        state: &mut Self,
-        wl_buffer: &WlBuffer,
-        event: wl_buffer::Event,
-        &buffer_id: &BufferId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wayland_client::protocol::wl_buffer::Event;
-        let this = &mut state.buffers[buffer_id];
-        match event {
-            Event::Release => {
-                let wl_shm_pool = this.pool.as_ref().unwrap();
-                wl_shm_pool.destroy();
-                wl_buffer.destroy();
-                state.buffers.remove(buffer_id);
-            }
-            _ => {}
-        }
-    }
 }
 
 fn make_buffer(
@@ -826,4 +564,267 @@ fn main() -> Result<()> {
     }
     queue.flush()?;
     Ok(())
+}
+
+empty_dispatch![
+    WlShm,
+    WlShmPool,
+    WlCompositor,
+    WlRegion,
+    ZwlrLayerShellV1,
+    ZwlrVirtualPointerV1,
+    ZwlrVirtualPointerManagerV1
+];
+
+impl Dispatch<WlRegistry, GlobalListContents> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlRegistry,
+        _event: wl_registry::Event,
+        _data: &GlobalListContents,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_registry::Event;
+        match _event {
+            Event::Global {
+                name: _,
+                interface: _,
+                version: _,
+            } => {}
+            Event::GlobalRemove { name: _ } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlSeat, SeatId> for App {
+    fn event(
+        state: &mut Self,
+        proxy: &WlSeat,
+        event: wl_seat::Event,
+        &data: &SeatId,
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_seat::Event;
+        let this = &mut state.seats[data];
+        match event {
+            Event::Capabilities { capabilities } => {
+                let WEnum::Value(v) = capabilities else {
+                    return;
+                };
+                if v.contains(Capability::Keyboard) {
+                    this.keyboard = Some(proxy.get_keyboard(qhandle, data));
+                }
+            }
+            Event::Name { name: _ } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlKeyboard, SeatId> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlKeyboard,
+        event: wl_keyboard::Event,
+        &data: &SeatId,
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_keyboard::Event;
+        let this = &mut state.seats[data];
+        match event {
+            Event::Keymap {
+                format: WEnum::Value(KeymapFormat::XkbV1),
+                fd,
+                size,
+            } => {
+                let keymap = unsafe {
+                    xkb::Keymap::new_from_fd(
+                        &this.xkb,
+                        fd.into_raw_fd(),
+                        size as usize,
+                        xkb::KEYMAP_FORMAT_TEXT_V1,
+                        xkb::COMPILE_NO_FLAGS,
+                    )
+                }
+                .ok()
+                .flatten();
+                if let Some(keymap) = keymap.as_ref() {
+                    this.xkb_state = Some(xkb::State::new(keymap));
+                    (this.mod_indices, this.specialized_bindings) =
+                        specialize_bindings(keymap, &state.config);
+                }
+            }
+            Event::Enter {
+                serial: _,
+                surface: _,
+                keys: _,
+            } => {}
+            Event::Leave {
+                serial: _,
+                surface: _,
+            } => {}
+            Event::Key {
+                serial: _,
+                time: _,
+                key,
+                state: WEnum::Value(KeyState::Pressed),
+            } => {
+                handle_key_pressed(state, key, data, qhandle);
+            }
+            Event::Modifiers {
+                serial: _,
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+            } => {
+                let state = this.xkb_state.as_mut().unwrap();
+                state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+            }
+            Event::RepeatInfo { rate: _, delay: _ } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlOutput, OutputId> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &WlOutput,
+        event: wl_output::Event,
+        &data: &OutputId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_output::Event;
+        let this = &mut state.outputs[data];
+        match event {
+            Event::Geometry {
+                x: _,
+                y: _,
+                physical_width: _,
+                physical_height: _,
+                subpixel: _,
+                make: _,
+                model: _,
+                transform: _,
+            } => {}
+            Event::Mode {
+                flags,
+                width,
+                height,
+                refresh: _,
+            } => {
+                let WEnum::Value(flags) = flags else {
+                    return;
+                };
+                if flags.contains(wl_output::Mode::Current) {
+                    this.state.pending.width = u32::try_from(width).expect("negative output width");
+                    this.state.pending.height =
+                        u32::try_from(height).expect("negative output height");
+                }
+            }
+            Event::Done => {
+                this.state.commit();
+            }
+            Event::Scale { factor } => {
+                this.state.pending.scale = u32::try_from(factor).expect("negative scale factor");
+            }
+            Event::Name { name: _ } => {}
+            Event::Description { description: _ } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlSurface, ()> for App {
+    fn event(
+        _state: &mut Self,
+        _proxy: &WlSurface,
+        event: wl_surface::Event,
+        &(): &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wl_surface::Event;
+        match event {
+            Event::Enter { output: _ } => {}
+            Event::Leave { output: _ } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        proxy: &ZwlrLayerSurfaceV1,
+        event: zwlr_layer_surface_v1::Event,
+        &(): &(),
+        _conn: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        use zwlr_layer_surface_v1::Event;
+        let this = &mut state.surface.as_mut().unwrap();
+        let output = &mut state.outputs[this.output];
+        match event {
+            Event::Configure {
+                serial,
+                width,
+                height,
+            } => {
+                proxy.ack_configure(serial);
+                proxy.set_size(width, height);
+                this.width = width;
+                this.height = height;
+                this.region = Region {
+                    x: 0,
+                    y: 0,
+                    width,
+                    height,
+                };
+                draw(
+                    &state.globals,
+                    &mut state.buffers,
+                    qhandle,
+                    width,
+                    height,
+                    output.state.current.as_ref().unwrap().scale,
+                    this,
+                )
+                .unwrap();
+            }
+            Event::Closed => {
+                state.surface = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlBuffer, BufferId> for App {
+    fn event(
+        state: &mut Self,
+        wl_buffer: &WlBuffer,
+        event: wl_buffer::Event,
+        &buffer_id: &BufferId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use wayland_client::protocol::wl_buffer::Event;
+        let this = &mut state.buffers[buffer_id];
+        match event {
+            Event::Release => {
+                let wl_shm_pool = this.pool.as_ref().unwrap();
+                wl_shm_pool.destroy();
+                wl_buffer.destroy();
+                state.buffers.remove(buffer_id);
+            }
+            _ => {}
+        }
+    }
 }
