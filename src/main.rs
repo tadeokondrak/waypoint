@@ -1,9 +1,11 @@
 #![allow(clippy::single_match, clippy::match_single_binding)]
 
 mod config;
+mod region;
 mod scfg;
 
 use crate::config::{specialize_bindings, Cmd, Config, Direction};
+use crate::region::Region;
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use handy::typed::{TypedHandle, TypedHandleMap};
@@ -78,20 +80,6 @@ struct Globals {
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
 
-#[derive(Default, Clone, Copy)]
-struct Point {
-    x: u32,
-    y: u32,
-}
-
-#[derive(Default, Clone, Copy)]
-struct Region {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
 struct Seat {
     wl_seat: Option<WlSeat>,
     virtual_pointer: Option<ZwlrVirtualPointerV1>,
@@ -163,84 +151,6 @@ impl Seat {
             buttons_down: HashSet::new(),
             mod_indices: ModIndices::default(),
             specialized_bindings: HashMap::new(),
-        }
-    }
-}
-
-impl Region {
-    fn center(self) -> Point {
-        Point {
-            x: self.x + self.width / 2,
-            y: self.y + self.height / 2,
-        }
-    }
-
-    fn cut_up(mut self) -> Region {
-        self.height /= 2;
-        self
-    }
-
-    fn cut_down(mut self) -> Region {
-        self.height /= 2;
-        self.y += self.height;
-        self
-    }
-
-    fn cut_left(mut self) -> Region {
-        self.width /= 2;
-        self
-    }
-
-    fn cut_right(mut self) -> Region {
-        self.width /= 2;
-        self.x += self.width;
-        self
-    }
-
-    fn move_up(mut self) -> Region {
-        self.y = self.y.saturating_sub(self.height);
-        self
-    }
-
-    fn move_down(mut self) -> Region {
-        self.y = self.y.saturating_add(self.height);
-        self
-    }
-
-    fn move_left(mut self) -> Region {
-        self.x = self.x.saturating_sub(self.width);
-        self
-    }
-
-    fn move_right(mut self) -> Region {
-        self.x = self.x.saturating_add(self.width);
-        self
-    }
-
-    fn contains(&self, x: u32, y: u32) -> bool {
-        x >= self.x && x < self.x + self.width && y >= self.y && y < self.y + self.height
-    }
-
-    fn contains_region(&self, other: &Region) -> bool {
-        self.contains(other.x, other.y)
-            && self.contains(other.x + other.width - 1, other.y + other.height - 1)
-    }
-
-    fn inverse_scale(&self, inverse_scale: u32) -> Region {
-        Region {
-            x: self.x / inverse_scale,
-            y: self.y / inverse_scale,
-            width: self.width / inverse_scale,
-            height: self.height / inverse_scale,
-        }
-    }
-
-    fn scale(&self, scale: u32) -> Region {
-        Region {
-            x: self.x * scale,
-            y: self.y * scale,
-            width: self.width * scale,
-            height: self.height * scale,
         }
     }
 }
