@@ -140,17 +140,18 @@ impl<T: Clone> DoubleBuffered<T> {
     }
 }
 
-impl Seat {
+impl Default for Seat {
     fn default() -> Seat {
         Seat {
-            wl_seat: None,
-            virtual_pointer: None,
             xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-            xkb_state: None,
-            keyboard: None,
-            buttons_down: HashSet::new(),
-            mod_indices: ModIndices::default(),
-            specialized_bindings: HashMap::new(),
+
+            wl_seat: Default::default(),
+            virtual_pointer: Default::default(),
+            xkb_state: Default::default(),
+            keyboard: Default::default(),
+            buttons_down: Default::default(),
+            mod_indices: Default::default(),
+            specialized_bindings: Default::default(),
         }
     }
 }
