@@ -100,7 +100,7 @@ struct Seat {
     keyboard: Option<WlKeyboard>,
     buttons_down: HashSet<u32>,
     mod_indices: ModIndices,
-    specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Cmd>,
+    specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>,
 }
 
 #[derive(Default)]
@@ -421,50 +421,56 @@ impl Dispatch<WlKeyboard, SeatId> for App {
                 let mut should_press = None;
                 let mut should_release = None;
                 let mut should_scroll = Vec::new();
-                match this.specialized_bindings.get(&(mod_mask, keycode)).copied() {
-                    Some(Cmd::Quit) => {
-                        state.will_quit = true;
-                    }
-                    Some(Cmd::Undo) => {
-                        if let Some(region) = surface.region_history.pop() {
-                            surface.region = region;
+                for cmd in this
+                    .specialized_bindings
+                    .get(&(mod_mask, keycode))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                {
+                    match *cmd {
+                        Cmd::Quit => {
+                            state.will_quit = true;
+                        }
+                        Cmd::Undo => {
+                            if let Some(region) = surface.region_history.pop() {
+                                surface.region = region;
+                            }
+                        }
+                        Cmd::Cut(dir) => update(
+                            surface,
+                            output,
+                            match dir {
+                                Direction::Up => Region::cut_up,
+                                Direction::Down => Region::cut_down,
+                                Direction::Left => Region::cut_left,
+                                Direction::Right => Region::cut_right,
+                            },
+                        ),
+                        Cmd::Move(dir) => update(
+                            surface,
+                            output,
+                            match dir {
+                                Direction::Up => Region::move_up,
+                                Direction::Down => Region::move_down,
+                                Direction::Left => Region::move_left,
+                                Direction::Right => Region::move_right,
+                            },
+                        ),
+                        Cmd::Click(btn) => {
+                            should_press = Some(btn.code());
+                            should_release = Some(btn.code());
+                            state.will_quit = true;
+                        }
+                        Cmd::Press(btn) => {
+                            should_press = Some(btn.code());
+                        }
+                        Cmd::Release(btn) => {
+                            should_release = Some(btn.code());
+                        }
+                        Cmd::Scroll(axis, amount) => {
+                            should_scroll.push((axis, amount));
                         }
                     }
-                    Some(Cmd::Cut(dir)) => update(
-                        surface,
-                        output,
-                        match dir {
-                            Direction::Up => Region::cut_up,
-                            Direction::Down => Region::cut_down,
-                            Direction::Left => Region::cut_left,
-                            Direction::Right => Region::cut_right,
-                        },
-                    ),
-                    Some(Cmd::Move(dir)) => update(
-                        surface,
-                        output,
-                        match dir {
-                            Direction::Up => Region::move_up,
-                            Direction::Down => Region::move_down,
-                            Direction::Left => Region::move_left,
-                            Direction::Right => Region::move_right,
-                        },
-                    ),
-                    Some(Cmd::Click(btn)) => {
-                        should_press = Some(btn.code());
-                        should_release = Some(btn.code());
-                        state.will_quit = true;
-                    }
-                    Some(Cmd::Press(btn)) => {
-                        should_press = Some(btn.code());
-                    }
-                    Some(Cmd::Release(btn)) => {
-                        should_release = Some(btn.code());
-                    }
-                    Some(Cmd::Scroll(axis, amount)) => {
-                        should_scroll.push((axis, amount));
-                    }
-                    None => {}
                 }
                 draw(
                     &state.globals,

@@ -47,7 +47,7 @@ bitflags! {
 }
 
 pub(crate) struct Config {
-    bindings: HashMap<(Mods, xkb::Keysym), Cmd>,
+    bindings: HashMap<(Mods, xkb::Keysym), Vec<Cmd>>,
 }
 
 impl Button {
@@ -154,28 +154,47 @@ impl Config {
                     );
 
                     for binding in &directive.children {
-                        ensure!(
-                            binding.children.is_empty(),
-                            "invalid config: line {}: binding should not have block",
-                            binding.line,
-                        );
+                        let cmd_names: Vec<String> = if binding.params.is_empty() {
+                            let mut cmd_names = Vec::new();
+                            for binding_cmd in &binding.children {
+                                ensure!(
+                                    binding_cmd.params.is_empty(),
+                                    "invalid config: line {}: binding with command should not have extra parameters",
+                                    binding_cmd.line,
+                                );
 
-                        ensure!(
-                            binding.params.len() == 1,
-                            "invalid config: line {}: binding should have exactly one parameter",
-                            binding.line,
-                        );
+                                cmd_names.push(binding_cmd.name.clone());
+                            }
+                            cmd_names
+                        } else {
+                            ensure!(
+                                binding.children.is_empty(),
+                                "invalid config: line {}: binding with command should not have block",
+                                binding.line,
+                            );
+
+                            ensure!(
+                                binding.params.len() == 1,
+                                "invalid config: line {}: binding with command should have exactly one parameter",
+                                binding.line,
+                            );
+
+                            binding.params.clone()
+                        };
 
                         let keys = &binding.name;
-                        let cmd = &binding.params[0];
+                        let mut cmds = Vec::new();
 
-                        let Some(cmd) = Cmd::from_kebab_case(cmd) else {
-                            bail!(
-                                "invalid config: line {}: invalid command {:?}",
-                                binding.line,
-                                cmd,
-                            );
-                        };
+                        for cmd_name in cmd_names {
+                            let Some(cmd) = Cmd::from_kebab_case(&cmd_name) else {
+                                bail!(
+                                    "invalid config: line {}: invalid command {:?}",
+                                    binding.line,
+                                    cmd_name,
+                                );
+                            };
+                            cmds.push(cmd);
+                        }
 
                         let mut modifiers = Mods::empty();
                         let mut keysym = None;
@@ -216,7 +235,7 @@ impl Config {
                         let keysym = keysym
                             .context(format!("invalid config: line {}: no key", binding.line))?;
 
-                        bindings.insert((modifiers, keysym), cmd);
+                        bindings.insert((modifiers, keysym), cmds);
                     }
                 }
                 _ => {
@@ -235,7 +254,7 @@ impl Config {
 pub(crate) fn specialize_bindings(
     keymap: &xkb::Keymap,
     config: &Config,
-) -> (ModIndices, HashMap<(xkb::ModMask, xkb::Keycode), Cmd>) {
+) -> (ModIndices, HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>) {
     let state = xkb::State::new(keymap);
     let mod_indices = ModIndices {
         shift: keymap.mod_get_index(xkb::MOD_NAME_SHIFT),
@@ -251,7 +270,7 @@ pub(crate) fn specialize_bindings(
     let specialized = config
         .bindings
         .iter()
-        .flat_map(|(&(modifiers, keysym), &cmd)| {
+        .flat_map(|(&(modifiers, keysym), cmds)| {
             let mut keycodes = Vec::new();
 
             keymap.key_for_each(|_, keycode| {
@@ -270,7 +289,7 @@ pub(crate) fn specialize_bindings(
 
             keycodes
                 .into_iter()
-                .map(move |keycode| ((mod_mask, keycode), cmd))
+                .map(move |keycode| ((mod_mask, keycode), cmds.clone()))
         })
         .collect();
 
