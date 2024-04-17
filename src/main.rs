@@ -4,8 +4,10 @@ mod config;
 mod region;
 mod scfg;
 
-use crate::config::{specialize_bindings, Cmd, Config, Direction};
-use crate::region::Region;
+use crate::{
+    config::{specialize_bindings, Cmd, Config, Direction},
+    region::Region,
+};
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
 use handy::typed::{TypedHandle, TypedHandleMap};
@@ -34,6 +36,10 @@ use wayland_client::{
     },
     Connection, Dispatch, QueueHandle, WEnum,
 };
+use wayland_protocols::xdg::xdg_output::zv1::client::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1,
+    zxdg_output_v1::{self, ZxdgOutputV1},
+};
 use wayland_protocols_wlr::{
     layer_shell::v1::client::{
         zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
@@ -57,8 +63,10 @@ struct App {
     seats: TypedHandleMap<Seat>,
     outputs: TypedHandleMap<Output>,
     buffers: TypedHandleMap<Buffer>,
-    surface: Option<Surface>,
     config: Config,
+    region: Region,
+    region_history: Vec<Region>,
+    global_bounds: Region,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -77,6 +85,7 @@ struct ModIndices {
 struct Globals {
     wl_shm: WlShm,
     wl_compositor: WlCompositor,
+    xdg_output: ZxdgOutputManagerV1,
     layer_shell: ZwlrLayerShellV1,
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
@@ -94,15 +103,19 @@ struct Seat {
 
 #[derive(Default)]
 struct Output {
+    surface: Option<Surface>,
     wl_output: Option<WlOutput>,
+    xdg_output: Option<ZxdgOutputV1>,
     state: DoubleBuffered<OutputState>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Copy, Clone)]
 struct OutputState {
-    scale: u32,
-    width: u32,
-    height: u32,
+    integer_scale: u32,
+    logical_x: i32,
+    logical_y: i32,
+    logical_width: i32,
+    logical_height: i32,
 }
 
 #[derive(Default)]
@@ -112,8 +125,6 @@ struct Surface {
     layer_surface: Option<ZwlrLayerSurfaceV1>,
     width: u32,
     height: u32,
-    region: Region,
-    region_history: Vec<Region>,
 }
 
 #[derive(Default)]
@@ -157,33 +168,32 @@ impl Default for Seat {
 }
 
 impl Output {
-    fn scaled_region(&self) -> Region {
+    fn region(&self) -> Region {
         let current = self.state.current.as_ref().unwrap();
         Region {
-            x: 0,
-            y: 0,
-            width: current.width,
-            height: current.height,
+            x: current.logical_x,
+            y: current.logical_y,
+            width: current.logical_width,
+            height: current.logical_height,
         }
-        .inverse_scale(current.scale)
     }
 }
 
 fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &QueueHandle<App>) {
-    fn update(surface: &mut Surface, output: &mut Output, cut: fn(Region) -> Region) {
-        surface.region_history.push(surface.region);
-        let bounds = output.scaled_region();
-        let new_region = cut(surface.region);
-        if bounds.contains_region(&new_region) {
-            surface.region = new_region;
+    fn update(
+        region: &mut Region,
+        region_history: &mut Vec<Region>,
+        global_bounds: Region,
+        cut: fn(Region) -> Region,
+    ) {
+        region_history.push(*region);
+        let new_region = cut(*region);
+        if global_bounds.contains_region(&new_region) {
+            *region = new_region;
         }
     }
 
-    let Some(surface) = state.surface.as_mut() else {
-        return;
-    };
     let seat = &mut state.seats[seat_id];
-    let output = &mut state.outputs[surface.output];
 
     let keycode = key + 8;
     let mod_mask = {
@@ -218,13 +228,14 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
                 state.will_quit = true;
             }
             Cmd::Undo => {
-                if let Some(region) = surface.region_history.pop() {
-                    surface.region = region;
+                if let Some(region) = state.region_history.pop() {
+                    state.region = region;
                 }
             }
             Cmd::Cut(dir) => update(
-                surface,
-                output,
+                &mut state.region,
+                &mut state.region_history,
+                state.global_bounds,
                 match dir {
                     Direction::Up => Region::cut_up,
                     Direction::Down => Region::cut_down,
@@ -233,8 +244,9 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
                 },
             ),
             Cmd::Move(dir) => update(
-                surface,
-                output,
+                &mut state.region,
+                &mut state.region_history,
+                state.global_bounds,
                 match dir {
                     Direction::Up => Region::move_up,
                     Direction::Down => Region::move_down,
@@ -259,24 +271,30 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
         }
     }
 
-    draw(
-        &state.globals,
-        &mut state.buffers,
-        qhandle,
-        surface.width,
-        surface.height,
-        output.state.current.as_ref().unwrap().scale,
-        surface,
-    )
-    .unwrap();
+    for output in state.outputs.iter() {
+        let surface = output.surface.as_ref().unwrap();
+        draw(
+            &state.globals,
+            &mut state.buffers,
+            qhandle,
+            output.state.current.as_ref().unwrap().integer_scale,
+            surface,
+            Region {
+                x: state.region.x - output.state.current.unwrap().logical_x,
+                y: state.region.y - output.state.current.unwrap().logical_y,
+                ..state.region
+            },
+        )
+        .unwrap();
+    }
 
     let virtual_pointer = &seat.virtual_pointer.as_ref().unwrap();
     virtual_pointer.motion_absolute(
         0,
-        surface.region.center().x,
-        surface.region.center().y,
-        surface.width,
-        surface.height,
+        state.region.center().x as u32,
+        state.region.center().y as u32,
+        state.global_bounds.width as u32,
+        state.global_bounds.height as u32,
     );
     virtual_pointer.frame();
 
@@ -304,26 +322,25 @@ fn draw(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
     qhandle: &QueueHandle<App>,
-    width: u32,
-    height: u32,
     scale: u32,
-    this: &mut Surface,
+    surface: &Surface,
+    region: Region,
 ) -> Result<()> {
-    let wl_surface = this.wl_surface.as_ref().unwrap();
+    let wl_surface = surface.wl_surface.as_ref().unwrap();
     let buffer_data = make_buffer(
         globals,
         buffers,
         qhandle,
-        i32::try_from(width * scale).unwrap(),
-        i32::try_from(height * scale).unwrap(),
-        i32::try_from(width * scale * 4).unwrap(),
+        i32::try_from(surface.width * scale).unwrap(),
+        i32::try_from(surface.height * scale).unwrap(),
+        i32::try_from(surface.width * scale * 4).unwrap(),
         Format::Argb8888,
     )?;
     let buffer = &mut buffers[buffer_data];
     let mut pixmap = tiny_skia::PixmapMut::from_bytes(
         buffer.mmap.as_deref_mut().unwrap(),
-        width * scale,
-        height * scale,
+        surface.width * scale,
+        surface.height * scale,
     )
     .expect("PixmapMut creation failed");
     let border_color = Color::WHITE;
@@ -335,7 +352,7 @@ fn draw(
     let border_thickness = 1.0;
     let cross_thickness = 2.0;
     draw_inner(
-        this.region,
+        region,
         scale,
         &mut pixmap,
         border_color,
@@ -460,6 +477,9 @@ fn main() -> Result<()> {
             wl_compositor: global_list
                 .bind(&qhandle, 4..=4, ())
                 .context("compositor doesn't support wl_compositor")?,
+            xdg_output: global_list
+                .bind(&qhandle, 3..=3, ())
+                .context("compositor doesn't support xdg_output_manager_v1")?,
             layer_shell: global_list
                 .bind(&qhandle, 1..=1, ())
                 .context("compositor doesn't support zwlr_layer_shell_v1")?,
@@ -470,8 +490,10 @@ fn main() -> Result<()> {
         seats: TypedHandleMap::new(),
         outputs: TypedHandleMap::new(),
         buffers: TypedHandleMap::new(),
-        surface: None,
         config: Config::load()?,
+        region: Region::default(),
+        region_history: Vec::new(),
+        global_bounds: Region::default(),
     };
     global_list.contents().with_list(|list| {
         for &Global {
@@ -499,41 +521,49 @@ fn main() -> Result<()> {
                     let output_id = app.outputs.insert(Output::default());
                     let output = &mut app.outputs[output_id];
                     let wl_output = registry.bind(name, version.max(1), &qhandle, output_id);
+                    let xdg_output = app
+                        .globals
+                        .xdg_output
+                        .get_xdg_output(&wl_output, &qhandle, output_id);
                     output.wl_output = Some(wl_output);
+                    output.xdg_output = Some(xdg_output);
                 }
                 _ => {}
             }
         }
     });
+
     queue.roundtrip(&mut app)?;
-    {
-        app.surface = Some(Surface::default());
-        let this = app.surface.as_mut().unwrap();
-        let (output_id, output) = app
-            .outputs
-            .iter_with_handles()
-            .next()
-            .context("no outputs")?;
+
+    for output in app.outputs.iter() {
+        app.global_bounds = app.global_bounds.union(&output.region());
+    }
+
+    app.region = app.global_bounds;
+
+    for (output_id, output) in app.outputs.iter_mut_with_handles() {
+        output.surface = Some(Surface::default());
+        let surface = output.surface.as_mut().unwrap();
         let wl_output = output.wl_output.as_ref().unwrap();
-        let surface = app.globals.wl_compositor.create_surface(&qhandle, ());
+        let wl_surface = app.globals.wl_compositor.create_surface(&qhandle, ());
         let layer_surface = app.globals.layer_shell.get_layer_surface(
-            &surface,
+            &wl_surface,
             Some(wl_output),
             Layer::Overlay,
             String::from("waypoint"),
             &qhandle,
-            (),
+            output_id,
         );
         layer_surface.set_size(0, 0);
         layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
         layer_surface.set_exclusive_zone(-1);
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
         let region = app.globals.wl_compositor.create_region(&qhandle, ());
-        surface.set_input_region(Some(&region));
-        surface.commit();
-        this.output = output_id;
-        this.wl_surface = Some(surface);
-        this.layer_surface = Some(layer_surface);
+        wl_surface.set_input_region(Some(&region));
+        wl_surface.commit();
+        surface.output = output_id;
+        surface.wl_surface = Some(wl_surface);
+        surface.layer_surface = Some(layer_surface);
     }
     while !app.will_quit {
         queue.blocking_dispatch(&mut app)?;
@@ -556,6 +586,7 @@ delegate_noop!(App: ignore WlRegion);
 delegate_noop!(App: ignore ZwlrLayerShellV1);
 delegate_noop!(App: ignore ZwlrVirtualPointerV1);
 delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
+delegate_noop!(App: ignore ZxdgOutputManagerV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for App {
     fn event(
@@ -684,39 +715,47 @@ impl Dispatch<WlOutput, OutputId> for App {
         use wl_output::Event;
         let this = &mut state.outputs[data];
         match event {
-            Event::Geometry {
-                x: _,
-                y: _,
-                physical_width: _,
-                physical_height: _,
-                subpixel: _,
-                make: _,
-                model: _,
-                transform: _,
-            } => {}
-            Event::Mode {
-                flags,
-                width,
-                height,
-                refresh: _,
-            } => {
-                let WEnum::Value(flags) = flags else {
-                    return;
-                };
-                if flags.contains(wl_output::Mode::Current) {
-                    this.state.pending.width = u32::try_from(width).expect("negative output width");
-                    this.state.pending.height =
-                        u32::try_from(height).expect("negative output height");
-                }
-            }
+            Event::Geometry { .. } => {}
+            Event::Mode { .. } => {}
             Event::Done => {
                 this.state.commit();
             }
             Event::Scale { factor } => {
-                this.state.pending.scale = u32::try_from(factor).expect("negative scale factor");
+                this.state.pending.integer_scale =
+                    u32::try_from(factor).expect("negative scale factor");
             }
-            Event::Name { name: _ } => {}
-            Event::Description { description: _ } => {}
+            Event::Name { .. } => {}
+            Event::Description { .. } => {}
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZxdgOutputV1, OutputId> for App {
+    fn event(
+        state: &mut Self,
+        _proxy: &ZxdgOutputV1,
+        event: zxdg_output_v1::Event,
+        &data: &OutputId,
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+        use zxdg_output_v1::Event;
+        let this = &mut state.outputs[data];
+        match event {
+            Event::LogicalPosition { x, y } => {
+                this.state.pending.logical_x = x;
+                this.state.pending.logical_y = y;
+            }
+            Event::LogicalSize { width, height } => {
+                this.state.pending.logical_width = width;
+                this.state.pending.logical_height = height;
+            }
+            Event::Done => {
+                // ignored; see spec
+            }
+            Event::Name { .. } => {}
+            Event::Description { .. } => {}
             _ => {}
         }
     }
@@ -740,47 +779,44 @@ impl Dispatch<WlSurface, ()> for App {
     }
 }
 
-impl Dispatch<ZwlrLayerSurfaceV1, ()> for App {
+impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for App {
     fn event(
         state: &mut Self,
         proxy: &ZwlrLayerSurfaceV1,
         event: zwlr_layer_surface_v1::Event,
-        &(): &(),
+        &output_id: &OutputId,
         _conn: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
         use zwlr_layer_surface_v1::Event;
-        let this = &mut state.surface.as_mut().unwrap();
-        let output = &mut state.outputs[this.output];
+        let output = &mut state.outputs[output_id];
         match event {
             Event::Configure {
                 serial,
                 width,
                 height,
             } => {
+                let surface = output.surface.as_mut().unwrap();
                 proxy.ack_configure(serial);
                 proxy.set_size(width, height);
-                this.width = width;
-                this.height = height;
-                this.region = Region {
-                    x: 0,
-                    y: 0,
-                    width,
-                    height,
-                };
+                surface.width = width;
+                surface.height = height;
                 draw(
                     &state.globals,
                     &mut state.buffers,
                     qhandle,
-                    width,
-                    height,
-                    output.state.current.as_ref().unwrap().scale,
-                    this,
+                    output.state.current.as_ref().unwrap().integer_scale,
+                    surface,
+                    Region {
+                        x: state.region.x - output.state.current.unwrap().logical_x,
+                        y: state.region.y - output.state.current.unwrap().logical_y,
+                        ..state.region
+                    },
                 )
                 .unwrap();
             }
             Event::Closed => {
-                state.surface = None;
+                output.surface = None;
             }
             _ => {}
         }
