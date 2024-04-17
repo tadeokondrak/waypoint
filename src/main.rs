@@ -17,6 +17,7 @@ use std::{
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
 use wayland_client::{
+    delegate_noop,
     globals::{registry_queue_init, Global, GlobalListContents},
     protocol::{
         wl_buffer::{self, WlBuffer},
@@ -126,24 +127,6 @@ struct Buffer {
 struct DoubleBuffered<T> {
     pending: T,
     current: Option<T>,
-}
-
-macro_rules! empty_dispatch {
-    ($($t:ty),*) => {
-        $(
-            impl Dispatch<$t, ()> for App {
-                fn event(
-                    _: &mut Self,
-                    _: &$t,
-                    _: <$t as wayland_client::Proxy>::Event,
-                    _: &(),
-                    _: &Connection,
-                    _: &QueueHandle<Self>,
-                ) {
-                }
-            }
-        )*
-    };
 }
 
 unsafe impl Zeroable for ModIndices {}
@@ -566,15 +549,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-empty_dispatch![
-    WlShm,
-    WlShmPool,
-    WlCompositor,
-    WlRegion,
-    ZwlrLayerShellV1,
-    ZwlrVirtualPointerV1,
-    ZwlrVirtualPointerManagerV1
-];
+delegate_noop!(App: ignore WlShm);
+delegate_noop!(App: ignore WlShmPool);
+delegate_noop!(App: ignore WlCompositor);
+delegate_noop!(App: ignore WlRegion);
+delegate_noop!(App: ignore ZwlrLayerShellV1);
+delegate_noop!(App: ignore ZwlrVirtualPointerV1);
+delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
 
 impl Dispatch<WlRegistry, GlobalListContents> for App {
     fn event(
