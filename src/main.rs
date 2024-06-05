@@ -67,6 +67,7 @@ struct App {
     region: Region,
     region_history: Vec<Region>,
     global_bounds: Region,
+    base_timestamp: u128,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -216,6 +217,7 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
     let mut should_press = None;
     let mut should_release = None;
     let mut should_scroll = Vec::new();
+    let t = wayland_timestamp(state.base_timestamp);
 
     for cmd in seat
         .specialized_bindings
@@ -290,7 +292,7 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
 
     let virtual_pointer = &seat.virtual_pointer.as_ref().unwrap();
     virtual_pointer.motion_absolute(
-        0,
+        t,
         state.region.center().x as u32,
         state.region.center().y as u32,
         state.global_bounds.width as u32,
@@ -299,20 +301,20 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
     virtual_pointer.frame();
 
     for (axis, amount) in should_scroll {
-        virtual_pointer.axis(0, axis, amount);
+        virtual_pointer.axis(t, axis, amount);
         virtual_pointer.frame();
     }
 
     if let Some(btn) = should_press {
         if seat.buttons_down.insert(btn) {
-            virtual_pointer.button(0, btn, ButtonState::Pressed);
+            virtual_pointer.button(t, btn, ButtonState::Pressed);
             virtual_pointer.frame();
         }
     }
 
     if let Some(btn) = should_release {
         if seat.buttons_down.remove(&btn) {
-            virtual_pointer.button(0, btn, ButtonState::Released);
+            virtual_pointer.button(t+1, btn, ButtonState::Released);
             virtual_pointer.frame();
         }
     }
@@ -494,6 +496,7 @@ fn main() -> Result<()> {
         region: Region::default(),
         region_history: Vec::new(),
         global_bounds: Region::default(),
+        base_timestamp: get_timestamp_millis(),
     };
     global_list.contents().with_list(|list| {
         for &Global {
@@ -844,4 +847,16 @@ impl Dispatch<WlBuffer, BufferId> for App {
             _ => {}
         }
     }
+}
+
+fn get_timestamp_millis() -> u128 {
+  use std::time::{SystemTime, UNIX_EPOCH};
+  let now = SystemTime::now();
+  let elapsed = now.duration_since(UNIX_EPOCH).unwrap();
+  elapsed.as_millis()
+}
+
+fn wayland_timestamp(base: u128) -> u32 {
+  let t = get_timestamp_millis();
+  u32::try_from(t - base).unwrap()
 }
