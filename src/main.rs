@@ -1,8 +1,9 @@
 #![allow(clippy::single_match, clippy::match_single_binding)]
 
+extern crate waypoint_scfg as scfg;
+
 mod config;
 mod region;
-mod scfg;
 
 use crate::{
     config::{specialize_bindings, Cmd, Config, Direction},

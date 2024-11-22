@@ -1,0 +1,9 @@
+[package]
+name = "waypoint_scfg"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+expect-test = "1.4.1"

@@ -1,4 +1,4 @@
-use crate::{scfg, ModIndices};
+use crate::ModIndices;
 use anyhow::{bail, ensure, Context, Result};
 use bitflags::bitflags;
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};

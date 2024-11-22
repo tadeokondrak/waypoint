@@ -1,21 +1,21 @@
 [package]
 name = "waypoint"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2021"
 
 [dependencies]
 anyhow = "1.0.70"
 bitflags = "2.3.3"
 bytemuck = "1.13.1"
-expect-test = "1.4.1"
 handy = "0.1.4"
 memfd = "0.6.3"
 memmap2 = "0.5.10"
+waypoint_scfg = { version = "0.0.0", path = "crates/scfg" }
 xkbcommon = "0.5.0"
 
 [dependencies.wayland-client]
 version = "0.30.1"
-default_features = false
+default-features = false
 
 [dependencies.wayland-protocols]
 version = "0.30.0"
@@ -29,3 +29,7 @@ features = ["client"]
 version = "0.8.3"
 default-features = false
 features = ["std", "simd"]
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
