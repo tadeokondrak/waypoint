@@ -16,7 +16,7 @@ use memmap2::{MmapMut, MmapOptions};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    os::fd::{AsRawFd, IntoRawFd},
+    os::fd::{AsRawFd, BorrowedFd, IntoRawFd},
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
 use wayland_client::{
@@ -454,9 +454,10 @@ fn make_buffer(
     let len_i32 = stride.checked_mul(height).expect("buffer too big");
     let len_usize = usize::try_from(len_i32).expect("buffer too big");
     memfd.as_file().write_all(&vec![0u8; len_i32 as usize])?;
+    let borrowed_memfd = unsafe { BorrowedFd::borrow_raw(memfd.as_raw_fd()) };
     let pool = globals
         .wl_shm
-        .create_pool(memfd.as_raw_fd(), len_i32, qhandle, ());
+        .create_pool(borrowed_memfd, len_i32, qhandle, ());
     let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, buffer_id);
     let mmap = unsafe { MmapOptions::new().len(len_usize).map_mut(memfd.as_file())? };
     this.pool = Some(pool);

@@ -14,15 +14,15 @@ waypoint_scfg = { version = "0.0.0", path = "crates/scfg" }
 xkbcommon = "0.5.0"
 
 [dependencies.wayland-client]
-version = "0.30.1"
+version = "0.31.7"
 default-features = false
 
 [dependencies.wayland-protocols]
-version = "0.30.0"
+version = "0.32.5"
 features = ["client", "staging", "unstable"]
 
 [dependencies.wayland-protocols-wlr]
-version = "0.1.0"
+version = "0.3.5"
 features = ["client"]
 
 [dependencies.tiny-skia]
