@@ -11,12 +11,14 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
-use calloop::LoopSignal;
+use calloop::{generic::Generic, LoopSignal};
 use calloop_wayland_source::WaylandSource;
+use core::panic;
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
+use reis::{ei, Interface as _};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     os::fd::{AsRawFd, BorrowedFd, IntoRawFd},
 };
@@ -69,6 +71,190 @@ struct App {
     region: Region,
     region_history: Vec<Region>,
     global_bounds: Region,
+    ei_state: EiState,
+}
+
+#[derive(Default)]
+struct EiState {
+    last_serial: u32,
+    seats: BTreeMap<u64, EiSeat>,
+}
+
+struct EiSeat {
+    ei_seat: ei::Seat,
+}
+
+impl App {
+    fn handle_ei_event(&mut self, ev: ei::Event) {
+        use ei::Event as E;
+        eprintln!("{ev:?}");
+        match ev {
+            E::Handshake(handshake, event) => {
+                use ei::handshake::Event as E;
+                match event {
+                    E::HandshakeVersion { version } => {
+                        handshake.handshake_version(version);
+                        handshake.context_type(ei::handshake::ContextType::Sender);
+                        handshake.name("waypoint");
+                        handshake.interface_version("ei_callback", 1);
+                        handshake.interface_version("ei_connection", 1);
+                        handshake.interface_version("ei_seat", 1);
+                        handshake.interface_version("ei_device", 1);
+                        handshake.interface_version("ei_pingpong", 1);
+                        handshake.interface_version("ei_pointer", 1);
+                        handshake.interface_version("ei_pointer_absolute", 1);
+                        handshake.interface_version("ei_button", 1);
+                        handshake.finish();
+                    }
+                    E::InterfaceVersion { .. } => {}
+                    E::Connection { serial, .. } => {
+                        self.ei_state.last_serial = serial;
+                    }
+                    _ => {}
+                }
+            }
+            E::Connection(_connection, event) => {
+                use ei::connection::Event as E;
+                match event {
+                    E::Disconnected { .. } => {}
+                    E::Seat { seat } => {
+                        let id = seat.as_object().id();
+                        self.ei_state.seats.insert(id, EiSeat { ei_seat: seat });
+                    }
+                    E::InvalidObject { .. } => {}
+                    E::Ping { ping } => {
+                        ping.done(0);
+                    }
+                    _ => {}
+                }
+            }
+            E::Callback(_callback, event) => {
+                use ei::callback::Event as E;
+                match event {
+                    E::Done { callback_data } => {}
+                    _ => {}
+                }
+            }
+            E::Pingpong(pingpong, event) => {
+                use ei::pingpong::Event as E;
+                match event {
+                    _ => {}
+                }
+            }
+            E::Seat(seat, event) => {
+                use ei::seat::Event as E;
+                let seat_data = self.ei_state.seats.get(&seat.as_object().id());
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Name { name } => {}
+                    E::Capability { mask, interface } => {
+                        match interface.as_str() {
+                            "ei_pointer" => {}
+                            "ei_pointer_absolute" => {}
+                            "ei_button" => {}
+                            _ => {}
+                        }
+                        //
+                    }
+                    E::Done => {
+                        seat.bind(1 | 2 | 8);
+                    }
+                    E::Device { device } => {}
+                    _ => {}
+                }
+            }
+            E::Device(device, event) => {
+                use ei::device::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Name { name } => {}
+                    E::DeviceType { device_type } => {}
+                    E::Dimensions { width, height } => {}
+                    E::Region {
+                        offset_x,
+                        offset_y,
+                        width,
+                        hight,
+                        scale,
+                    } => {}
+                    E::Interface { object } => {}
+                    E::Done => {}
+                    E::Resumed { serial } => {}
+                    E::Paused { serial } => {}
+                    E::StartEmulating { serial, sequence } => {}
+                    E::StopEmulating { serial } => {}
+                    E::Frame { serial, timestamp } => {}
+                    E::RegionMappingId { mapping_id } => {}
+                    _ => {}
+                }
+            }
+            E::Pointer(pointer, event) => {
+                use ei::pointer::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::MotionRelative { x, y } => {}
+                    _ => {}
+                }
+            }
+            E::PointerAbsolute(pointer_absolute, event) => {
+                use ei::pointer_absolute::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::MotionAbsolute { x, y } => {}
+                    _ => {}
+                }
+            }
+            E::Scroll(scroll, event) => {
+                use ei::scroll::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Scroll { x, y } => {}
+                    E::ScrollDiscrete { x, y } => {}
+                    E::ScrollStop { x, y, is_cancel } => {}
+                    _ => {}
+                }
+            }
+            E::Button(button, event) => {
+                use ei::button::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Button { button, state } => {}
+                    _ => {}
+                }
+            }
+            E::Keyboard(keyboard, event) => {
+                use ei::keyboard::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Keymap {
+                        keymap_type,
+                        size,
+                        keymap,
+                    } => {}
+                    E::Key { key, state } => {}
+                    E::Modifiers {
+                        serial,
+                        depressed,
+                        locked,
+                        latched,
+                        group,
+                    } => {}
+                    _ => {}
+                }
+            }
+            E::Touchscreen(touchscreen, event) => {
+                use ei::touchscreen::Event as E;
+                match event {
+                    E::Destroyed { serial } => {}
+                    E::Down { touchid, x, y } => {}
+                    E::Motion { touchid, x, y } => {}
+                    E::Up { touchid } => {}
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -469,6 +655,32 @@ fn make_buffer(
 
 fn main() -> Result<()> {
     let mut event_loop: calloop::EventLoop<'_, App> = calloop::EventLoop::try_new().unwrap();
+    let eictx = ei::Context::connect_to_env().context("ei::Context::connect_to_env")?;
+    if let Some(eictx) = eictx {
+        let source = Generic::new(eictx, calloop::Interest::READ, calloop::Mode::Level);
+        event_loop
+            .handle()
+            .insert_source(source, |_readiness, context, app| {
+                let eictx = unsafe { context.get_mut() };
+                if let Err(e) = eictx.read() {
+                    eprintln!("ei read failed: {e}");
+                    return Ok(calloop::PostAction::Remove);
+                }
+                while let Some(result) = context.pending_event() {
+                    match result {
+                        reis::PendingRequestResult::Request(req) => app.handle_ei_event(req),
+                        reis::PendingRequestResult::ParseError(parse_error) => {
+                            panic!("ei parse error: {parse_error}");
+                        }
+                        reis::PendingRequestResult::InvalidObject(id) => {
+                            panic!("ei invalid object: {id}");
+                        }
+                    }
+                }
+                context.flush()?;
+                Ok(calloop::PostAction::Continue)
+            })?;
+    }
     let conn = Connection::connect_to_env()?;
     let (global_list, queue) = registry_queue_init(&conn)?;
     let qhandle = queue.handle();
@@ -503,6 +715,7 @@ fn main() -> Result<()> {
         region: Region::default(),
         region_history: Vec::new(),
         global_bounds: Region::default(),
+        ei_state: EiState::default(),
     };
     global_list.contents().with_list(|list| {
         for &Global {
