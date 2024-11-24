@@ -243,6 +243,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reis"
+version = "0.4.0"
+source = "git+https://github.com/ids1024/reis#63ea2bb3c942cd39927b01bce8e19c0d5208e818"
+dependencies = [
+ "rustix 0.38.41",
+]
+
+[[package]]
 name = "rustix"
 version = "0.37.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -378,6 +386,7 @@ dependencies = [
  "handy",
  "memfd",
  "memmap2",
+ "reis",
  "tiny-skia",
  "wayland",
  "wayland_scanner",

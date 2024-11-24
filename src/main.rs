@@ -16,7 +16,10 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
-use calloop::{generic::Generic, LoopSignal};
+use calloop::{
+    generic::{Generic, NoIoDrop},
+    LoopSignal,
+};
 use generated::{
     Event, Interface, Protocols, Request, WlBuffer, WlBufferEvent, WlBufferRequest, WlCallback,
     WlCallbackEvent, WlCompositor, WlCompositorRequest, WlDisplay, WlDisplayEvent,
@@ -31,6 +34,7 @@ use generated::{
 };
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
+use reis::{ei, Interface as _};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
@@ -55,6 +59,140 @@ struct App {
     region: Region,
     region_history: Vec<Region>,
     global_bounds: Region,
+    ei_state: EiState,
+}
+
+#[derive(Default)]
+struct EiState {
+    sequence: u32,
+    last_serial: u32,
+    seats: HashMap<u64, EiSeat>,
+    devices: HashMap<u64, EiDevice>,
+}
+
+struct EiSeat {
+    capabilities: u64,
+}
+
+struct EiDevice {
+    ei_device: ei::Device,
+    pointer_absolute: Option<ei::PointerAbsolute>,
+    button: Option<ei::Button>,
+    scroll: Option<ei::Scroll>,
+}
+
+impl App {
+    fn handle_ei_event(&mut self, ev: ei::Event) {
+        use ei::Event as E;
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("EI_DEBUG").is_ok_and(|v| v != "0") {
+                eprintln!("<- {ev:?}");
+            }
+        }
+        match ev {
+            E::Handshake(handshake, event) => {
+                use ei::handshake::Event as E;
+                match event {
+                    E::HandshakeVersion { version } => {
+                        handshake.handshake_version(version);
+                        handshake.context_type(ei::handshake::ContextType::Sender);
+                        handshake.name("waypoint");
+                        handshake.interface_version("ei_callback", 1);
+                        handshake.interface_version("ei_connection", 1);
+                        handshake.interface_version("ei_seat", 1);
+                        handshake.interface_version("ei_device", 1);
+                        handshake.interface_version("ei_pingpong", 1);
+                        handshake.interface_version("ei_pointer_absolute", 1);
+                        handshake.interface_version("ei_button", 1);
+                        handshake.interface_version("ei_scroll", 1);
+                        handshake.finish();
+                    }
+                    E::Connection { serial, .. } => {
+                        self.ei_state.last_serial = serial;
+                    }
+                    _ => {}
+                }
+            }
+            E::Connection(_connection, event) => {
+                use ei::connection::Event as E;
+                match event {
+                    E::Seat { seat } => {
+                        let id = seat.as_object().id();
+                        self.ei_state.seats.insert(
+                            id,
+                            EiSeat {
+                                capabilities: 0,
+                            },
+                        );
+                    }
+                    E::Ping { ping } => {
+                        ping.done(0);
+                    }
+                    _ => {}
+                }
+            }
+            E::Seat(seat, event) => {
+                use ei::seat::Event as E;
+                let seat_data = self.ei_state.seats.get_mut(&seat.as_object().id()).unwrap();
+                match event {
+                    E::Capability { mask, interface } => match interface.as_str() {
+                        "ei_pointer_absolute" | "ei_button" | "ei_scroll" => {
+                            seat_data.capabilities |= mask;
+                        }
+                        _ => {}
+                    },
+                    E::Done => {
+                        seat.bind(seat_data.capabilities);
+                    }
+                    E::Device { device } => {
+                        let id = device.as_object().id();
+                        self.ei_state.devices.insert(
+                            id,
+                            EiDevice {
+                                ei_device: device,
+                                pointer_absolute: None,
+                                button: None,
+                                scroll: None,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            E::Device(device, event) => {
+                use ei::device::Event as E;
+                let device_data = self
+                    .ei_state
+                    .devices
+                    .get_mut(&device.as_object().id())
+                    .unwrap();
+                match event {
+                    E::Interface { object } => match object.interface() {
+                        "ei_pointer_absolute" => {
+                            device_data.pointer_absolute =
+                                Some(object.downcast::<ei::PointerAbsolute>().unwrap());
+                        }
+                        "ei_button" => {
+                            device_data.button = Some(object.downcast::<ei::Button>().unwrap());
+                        }
+                        "ei_scroll" => {
+                            device_data.scroll = Some(object.downcast::<ei::Scroll>().unwrap());
+                        }
+                        _ => {}
+                    },
+                    E::Done => {
+                        device.start_emulating(self.ei_state.sequence, self.ei_state.last_serial);
+                        self.ei_state.sequence += 1;
+                        device.frame(self.ei_state.last_serial, 0);
+                        device.stop_emulating(self.ei_state.last_serial);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Default, Clone, Copy)]
@@ -334,6 +472,55 @@ fn handle_key_pressed(
                 });
             }
         }
+    } else if let Some(device) = state.ei_state.devices.values().next() {
+        if let EiDevice {
+            ei_device,
+            pointer_absolute: Some(pointer_absolute),
+            button: Some(button),
+            scroll: Some(scroll),
+        } = device
+        {
+            ei_device.start_emulating(state.ei_state.sequence, state.ei_state.last_serial);
+            state.ei_state.sequence += 1;
+
+            pointer_absolute.motion_absolute(
+                state.region.center().x as f32,
+                state.region.center().y as f32,
+            );
+            ei_device.frame(state.ei_state.last_serial, time.into());
+
+            for (axis, amount) in should_scroll {
+                scroll.scroll(
+                    if axis == WlPointer::AXIS_HORIZONTAL_SCROLL {
+                        amount as f32
+                    } else {
+                        0.0
+                    },
+                    if axis == WlPointer::AXIS_VERTICAL_SCROLL {
+                        amount as f32
+                    } else {
+                        0.0
+                    },
+                );
+                ei_device.frame(state.ei_state.last_serial, time.into());
+            }
+
+            if let Some(button_index) = should_press {
+                if seat.buttons_down.insert(button_index) {
+                    button.button(button_index, ei::button::ButtonState::Press);
+                    ei_device.frame(state.ei_state.last_serial, time.into());
+                }
+            }
+
+            if let Some(button_index) = should_release {
+                if seat.buttons_down.remove(&button_index) {
+                    button.button(button_index, ei::button::ButtonState::Released);
+                    ei_device.frame(state.ei_state.last_serial, time.into());
+                }
+            }
+
+            ei_device.stop_emulating(state.ei_state.last_serial);
+        }
     }
 }
 
@@ -565,7 +752,12 @@ struct ObjectData {
 impl Connection {
     fn send<'a>(&mut self, request: impl Into<Request<'a>>) {
         let request = request.into();
-        // eprintln!("-> {request:?}");
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("WAYLAND_DEBUG").is_ok_and(|v| v != "0") {
+                eprintln!("-> {request:?}");
+            }
+        }
         Protocols::marshal_request(request, &mut self.wire)
     }
 
@@ -577,7 +769,12 @@ impl Connection {
     {
         let obj = self.create(data);
         let request = f(obj).into();
-        // eprintln!("-> {request:?}");
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("WAYLAND_DEBUG").is_ok_and(|v| v != "0") {
+                eprintln!("-> {request:?}");
+            }
+        }
         request.marshal(&mut self.wire);
         obj
     }
@@ -595,7 +792,12 @@ impl Connection {
             .wire
             .read_message(|msg| Event::unmarshal(self.ids.data_for(msg.object()).interface, msg))
         {
-            // eprintln!("<- {event:?}");
+            #[cfg(debug_assertions)]
+            {
+                if std::env::var("WAYLAND_DEBUG").is_ok_and(|v| v != "0") {
+                    eprintln!("<- {event:?}");
+                }
+            }
             match event {
                 Event::WlDisplay(WlDisplayEvent::DeleteId { wl_display: _, id }) => {
                     self.ids.release(id);
@@ -700,6 +902,37 @@ fn main() -> Result<()> {
     };
 
     let mut event_loop: calloop::EventLoop<'_, App> = calloop::EventLoop::try_new().unwrap();
+    let eictx = ei::Context::connect_to_env().context("ei::Context::connect_to_env")?;
+    let mut ei_dispatcher = if let Some(eictx) = eictx {
+        let source = Generic::new(eictx, calloop::Interest::READ, calloop::Mode::Level);
+        let handler = |_readiness, context: &mut NoIoDrop<ei::Context>, app: &mut App| {
+            let eictx = unsafe { context.get_mut() };
+            if let Err(e) = eictx.read() {
+                eprintln!("ei read failed: {e}");
+                return Ok(calloop::PostAction::Remove);
+            }
+            while let Some(result) = context.pending_event() {
+                match result {
+                    reis::PendingRequestResult::Request(req) => app.handle_ei_event(req),
+                    reis::PendingRequestResult::ParseError(parse_error) => {
+                        panic!("ei parse error: {parse_error}");
+                    }
+                    reis::PendingRequestResult::InvalidObject(id) => {
+                        panic!("ei invalid object: {id}");
+                    }
+                }
+            }
+            context.flush()?;
+            Ok(calloop::PostAction::Continue)
+        };
+        let dispatcher = calloop::Dispatcher::new(source, handler);
+        event_loop
+            .handle()
+            .register_dispatcher(dispatcher.clone())?;
+        Some(dispatcher)
+    } else {
+        None
+    };
     let mut app = App {
         loop_signal: event_loop.get_signal(),
         globals,
@@ -710,6 +943,7 @@ fn main() -> Result<()> {
         region: Region::default(),
         region_history: Vec::new(),
         global_bounds: Region::default(),
+        ei_state: EiState::default(),
     };
 
     if let Some(seat_list) = global_list.get(Interface::WlSeat.name()) {
@@ -826,17 +1060,19 @@ fn main() -> Result<()> {
     }
 
     for seat in app.seats.iter() {
-        conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
-            zwlr_virtual_pointer_v1: seat.virtual_pointer,
-            time: 0,
-            x: app.region.center().x as u32,
-            y: app.region.center().y as u32,
-            x_extent: app.global_bounds.width as u32,
-            y_extent: app.global_bounds.height as u32,
-        });
-        conn.send(ZwlrVirtualPointerV1Request::Frame {
-            zwlr_virtual_pointer_v1: seat.virtual_pointer,
-        });
+        if !seat.virtual_pointer.is_null() {
+            conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                time: 0,
+                x: app.region.center().x as u32,
+                y: app.region.center().y as u32,
+                x_extent: app.global_bounds.width as u32,
+                y_extent: app.global_bounds.height as u32,
+            });
+            conn.send(ZwlrVirtualPointerV1Request::Frame {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            });
+        }
     }
 
     conn.wire.flush_blocking()?;
@@ -861,6 +1097,11 @@ fn main() -> Result<()> {
         let mut conn = dispatcher.as_source_mut();
         // safety: we don't invalidate the fd in this block
         let conn = unsafe { conn.get_mut() };
+        if let Some(eiconn) = ei_dispatcher.as_mut() {
+            let mut eiconn = eiconn.as_source_mut();
+            let eiconn = unsafe { eiconn.get_mut() };
+            eiconn.flush().unwrap();
+        }
         conn.wire.flush_blocking().unwrap();
     })?;
 

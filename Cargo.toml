@@ -11,6 +11,7 @@ calloop = "0.14.1"
 handy = "0.1.4"
 memfd = "0.6.3"
 memmap2 = "0.5.10"
+reis = "0.4.0"
 waypoint_scfg = { version = "0.0.0", path = "crates/scfg" }
 xkbcommon = "0.5.0"
 wayland = { path = "crates/wayland" }
@@ -26,3 +27,6 @@ wayland_scanner = { path = "crates/wayland_scanner" }
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+
+[patch.crates-io]
+reis = { git = "https://github.com/ids1024/reis" }
