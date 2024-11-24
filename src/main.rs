@@ -11,6 +11,8 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
+use calloop::LoopSignal;
+use calloop_wayland_source::WaylandSource;
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
@@ -58,8 +60,7 @@ type OutputId = TypedHandle<Output>;
 type BufferId = TypedHandle<Buffer>;
 
 struct App {
-    will_quit: bool,
-    _conn: Connection,
+    loop_signal: LoopSignal,
     globals: Globals,
     seats: TypedHandleMap<Seat>,
     outputs: TypedHandleMap<Output>,
@@ -226,7 +227,7 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
     {
         match *cmd {
             Cmd::Quit => {
-                state.will_quit = true;
+                state.loop_signal.stop();
             }
             Cmd::Undo => {
                 if let Some(region) = state.region_history.pop() {
@@ -258,7 +259,7 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
             Cmd::Click(btn) => {
                 should_press = Some(btn.code());
                 should_release = Some(btn.code());
-                state.will_quit = true;
+                state.loop_signal.stop();
             }
             Cmd::Press(btn) => {
                 should_press = Some(btn.code());
@@ -467,12 +468,17 @@ fn make_buffer(
 }
 
 fn main() -> Result<()> {
+    let mut event_loop: calloop::EventLoop<'_, App> = calloop::EventLoop::try_new().unwrap();
     let conn = Connection::connect_to_env()?;
-    let (global_list, mut queue) = registry_queue_init(&conn)?;
+    let (global_list, queue) = registry_queue_init(&conn)?;
     let qhandle = queue.handle();
+    let source = WaylandSource::new(conn, queue);
+    let dispatcher = calloop::Dispatcher::new(source, |(), queue, app| queue.dispatch_pending(app));
+    event_loop
+        .handle()
+        .register_dispatcher(dispatcher.clone())?;
     let mut app = App {
-        will_quit: false,
-        _conn: conn,
+        loop_signal: event_loop.get_signal(),
         globals: Globals {
             wl_shm: global_list
                 .bind(&qhandle, 1..=1, ())
@@ -537,7 +543,7 @@ fn main() -> Result<()> {
         }
     });
 
-    queue.roundtrip(&mut app)?;
+    dispatcher.as_source_mut().queue().roundtrip(&mut app)?;
 
     for output in app.outputs.iter() {
         app.global_bounds = app.global_bounds.union(&output.region());
@@ -569,9 +575,7 @@ fn main() -> Result<()> {
         surface.wl_surface = Some(wl_surface);
         surface.layer_surface = Some(layer_surface);
     }
-    while !app.will_quit {
-        queue.blocking_dispatch(&mut app)?;
-    }
+    event_loop.run(None, &mut app, |_| {})?;
     for seat in app.seats.iter() {
         for &button in &seat.buttons_down {
             if let Some(virtual_pointer) = seat.virtual_pointer.as_ref() {
@@ -580,7 +584,7 @@ fn main() -> Result<()> {
             }
         }
     }
-    queue.flush()?;
+    dispatcher.as_source_mut().queue().flush()?;
     Ok(())
 }
 
