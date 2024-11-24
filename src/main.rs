@@ -88,7 +88,7 @@ struct Globals {
     wl_compositor: WlCompositor,
     xdg_output: ZxdgOutputManagerV1,
     layer_shell: ZwlrLayerShellV1,
-    virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
+    virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
 }
 
 struct Seat {
@@ -289,32 +289,33 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
         .unwrap();
     }
 
-    let virtual_pointer = &seat.virtual_pointer.as_ref().unwrap();
-    virtual_pointer.motion_absolute(
-        0,
-        state.region.center().x as u32,
-        state.region.center().y as u32,
-        state.global_bounds.width as u32,
-        state.global_bounds.height as u32,
-    );
-    virtual_pointer.frame();
-
-    for (axis, amount) in should_scroll {
-        virtual_pointer.axis(0, axis, amount);
+    if let Some(virtual_pointer) = seat.virtual_pointer.as_ref() {
+        virtual_pointer.motion_absolute(
+            0,
+            state.region.center().x as u32,
+            state.region.center().y as u32,
+            state.global_bounds.width as u32,
+            state.global_bounds.height as u32,
+        );
         virtual_pointer.frame();
-    }
 
-    if let Some(btn) = should_press {
-        if seat.buttons_down.insert(btn) {
-            virtual_pointer.button(0, btn, ButtonState::Pressed);
+        for (axis, amount) in should_scroll {
+            virtual_pointer.axis(0, axis, amount);
             virtual_pointer.frame();
         }
-    }
 
-    if let Some(btn) = should_release {
-        if seat.buttons_down.remove(&btn) {
-            virtual_pointer.button(0, btn, ButtonState::Released);
-            virtual_pointer.frame();
+        if let Some(btn) = should_press {
+            if seat.buttons_down.insert(btn) {
+                virtual_pointer.button(0, btn, ButtonState::Pressed);
+                virtual_pointer.frame();
+            }
+        }
+
+        if let Some(btn) = should_release {
+            if seat.buttons_down.remove(&btn) {
+                virtual_pointer.button(0, btn, ButtonState::Released);
+                virtual_pointer.frame();
+            }
         }
     }
 }
@@ -485,8 +486,8 @@ fn main() -> Result<()> {
                 .bind(&qhandle, 1..=1, ())
                 .context("compositor doesn't support zwlr_layer_shell_v1")?,
             virtual_pointer_manager: global_list
-                .bind(&qhandle, 1..=1, ())
-                .context("compositor doesn't support zwlr_virtual_pointer_manager_v1")?,
+                .bind::<ZwlrVirtualPointerManagerV1, _, _>(&qhandle, 1..=1, ())
+                .ok(),
         },
         seats: TypedHandleMap::new(),
         outputs: TypedHandleMap::new(),
@@ -509,13 +510,14 @@ fn main() -> Result<()> {
                     let seat_id = app.seats.insert(Seat::default());
                     let wl_seat = registry.bind(name, version.max(1), &qhandle, seat_id);
                     let seat = &mut app.seats[seat_id];
-                    let virtual_pointer_manager = &app.globals.virtual_pointer_manager;
-                    let virtual_pointer = virtual_pointer_manager.create_virtual_pointer(
-                        Some(&wl_seat),
-                        &qhandle,
-                        (),
-                    );
-                    seat.virtual_pointer = Some(virtual_pointer);
+                    if let Some(virtual_pointer_manager) = &app.globals.virtual_pointer_manager {
+                        let virtual_pointer = virtual_pointer_manager.create_virtual_pointer(
+                            Some(&wl_seat),
+                            &qhandle,
+                            (),
+                        );
+                        seat.virtual_pointer = Some(virtual_pointer);
+                    }
                     seat.wl_seat = Some(wl_seat);
                 }
                 "wl_output" => {
@@ -571,9 +573,10 @@ fn main() -> Result<()> {
     }
     for seat in app.seats.iter() {
         for &button in &seat.buttons_down {
-            let virtual_pointer = seat.virtual_pointer.as_ref().unwrap();
-            virtual_pointer.button(0, button, ButtonState::Released);
-            virtual_pointer.frame();
+            if let Some(virtual_pointer) = seat.virtual_pointer.as_ref() {
+                virtual_pointer.button(0, button, ButtonState::Released);
+                virtual_pointer.frame();
+            }
         }
     }
     queue.flush()?;
