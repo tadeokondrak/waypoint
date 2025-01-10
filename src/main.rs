@@ -1,5 +1,10 @@
 #![allow(clippy::single_match, clippy::match_single_binding)]
 
+mod generated {
+    #![allow(unused)]
+    include!(concat!(env!("OUT_DIR"), "/wayland.rs"));
+}
+
 extern crate waypoint_scfg as scfg;
 
 mod config;
@@ -11,48 +16,29 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
-use calloop::LoopSignal;
-use calloop_wayland_source::WaylandSource;
+use calloop::{generic::Generic, LoopSignal};
+use generated::{
+    Event, Interface, Protocols, Request, WlBuffer, WlBufferEvent, WlBufferRequest, WlCallback,
+    WlCallbackEvent, WlCompositor, WlCompositorRequest, WlDisplay, WlDisplayEvent,
+    WlDisplayRequest, WlKeyboard, WlKeyboardEvent, WlOutput, WlOutputEvent, WlPointer,
+    WlPointerEvent, WlRegistry, WlRegistryEvent, WlRegistryRequest, WlSeat, WlSeatEvent,
+    WlSeatRequest, WlShm, WlShmEvent, WlShmPool, WlShmPoolRequest, WlShmRequest, WlSurface,
+    WlSurfaceEvent, WlSurfaceRequest, WlTouchEvent, ZwlrLayerShellV1, ZwlrLayerShellV1Request,
+    ZwlrLayerSurfaceV1, ZwlrLayerSurfaceV1Event, ZwlrLayerSurfaceV1Request,
+    ZwlrVirtualPointerManagerV1, ZwlrVirtualPointerManagerV1Request, ZwlrVirtualPointerV1,
+    ZwlrVirtualPointerV1Request, ZxdgOutputManagerV1, ZxdgOutputManagerV1Request, ZxdgOutputV1,
+    ZxdgOutputV1Event,
+};
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
-    os::fd::{AsRawFd, BorrowedFd, IntoRawFd},
+    ops::RangeInclusive,
+    os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd},
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
-use wayland_client::{
-    delegate_noop,
-    globals::{registry_queue_init, Global, GlobalListContents},
-    protocol::{
-        wl_buffer::{self, WlBuffer},
-        wl_compositor::WlCompositor,
-        wl_keyboard::{self, KeyState, KeymapFormat, WlKeyboard},
-        wl_output::{self, WlOutput},
-        wl_pointer::ButtonState,
-        wl_region::WlRegion,
-        wl_registry::{self, WlRegistry},
-        wl_seat::{self, Capability, WlSeat},
-        wl_shm::{Format, WlShm},
-        wl_shm_pool::WlShmPool,
-        wl_surface::{self, WlSurface},
-    },
-    Connection, Dispatch, QueueHandle, WEnum,
-};
-use wayland_protocols::xdg::xdg_output::zv1::client::{
-    zxdg_output_manager_v1::ZxdgOutputManagerV1,
-    zxdg_output_v1::{self, ZxdgOutputV1},
-};
-use wayland_protocols_wlr::{
-    layer_shell::v1::client::{
-        zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
-        zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity, ZwlrLayerSurfaceV1},
-    },
-    virtual_pointer::v1::client::{
-        zwlr_virtual_pointer_manager_v1::ZwlrVirtualPointerManagerV1,
-        zwlr_virtual_pointer_v1::ZwlrVirtualPointerV1,
-    },
-};
+use wayland::{Object as _, Protocols as _};
 use xkbcommon::xkb;
 
 type SeatId = TypedHandle<Seat>;
@@ -89,15 +75,15 @@ struct Globals {
     wl_compositor: WlCompositor,
     xdg_output: ZxdgOutputManagerV1,
     layer_shell: ZwlrLayerShellV1,
-    virtual_pointer_manager: Option<ZwlrVirtualPointerManagerV1>,
+    virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
 
 struct Seat {
-    wl_seat: Option<WlSeat>,
-    virtual_pointer: Option<ZwlrVirtualPointerV1>,
+    wl_seat: WlSeat,
+    virtual_pointer: ZwlrVirtualPointerV1,
     xkb: xkb::Context,
     xkb_state: Option<xkb::State>,
-    keyboard: Option<WlKeyboard>,
+    keyboard: WlKeyboard,
     buttons_down: HashSet<u32>,
     mod_indices: ModIndices,
     specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>,
@@ -106,8 +92,8 @@ struct Seat {
 #[derive(Default)]
 struct Output {
     surface: Option<Surface>,
-    wl_output: Option<WlOutput>,
-    xdg_output: Option<ZxdgOutputV1>,
+    wl_output: WlOutput,
+    xdg_output: ZxdgOutputV1,
     state: DoubleBuffered<OutputState>,
 }
 
@@ -123,16 +109,16 @@ struct OutputState {
 #[derive(Default)]
 struct Surface {
     output: OutputId,
-    wl_surface: Option<WlSurface>,
-    layer_surface: Option<ZwlrLayerSurfaceV1>,
+    wl_surface: WlSurface,
+    layer_surface: ZwlrLayerSurfaceV1,
     width: u32,
     height: u32,
 }
 
 #[derive(Default)]
 struct Buffer {
-    pool: Option<WlShmPool>,
-    wl_buffer: Option<WlBuffer>,
+    pool: WlShmPool,
+    wl_buffer: WlBuffer,
     mmap: Option<MmapMut>,
 }
 
@@ -181,7 +167,13 @@ impl Output {
     }
 }
 
-fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &QueueHandle<App>) {
+fn handle_key_pressed(
+    state: &mut App,
+    time: u32,
+    key: u32,
+    seat_id: SeatId,
+    conn: &mut Connection,
+) {
     fn update(
         region: &mut Region,
         region_history: &mut Vec<Region>,
@@ -278,7 +270,7 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
         draw(
             &state.globals,
             &mut state.buffers,
-            qhandle,
+            conn,
             output.state.current.as_ref().unwrap().integer_scale,
             surface,
             Region {
@@ -290,32 +282,56 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
         .unwrap();
     }
 
-    if let Some(virtual_pointer) = seat.virtual_pointer.as_ref() {
-        virtual_pointer.motion_absolute(
-            0,
-            state.region.center().x as u32,
-            state.region.center().y as u32,
-            state.global_bounds.width as u32,
-            state.global_bounds.height as u32,
-        );
-        virtual_pointer.frame();
+    if !seat.virtual_pointer.is_null() {
+        conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
+            zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            time,
+            x: state.region.center().x as u32,
+            y: state.region.center().y as u32,
+            x_extent: state.global_bounds.width as u32,
+            y_extent: state.global_bounds.height as u32,
+        });
+        conn.send(ZwlrVirtualPointerV1Request::Frame {
+            zwlr_virtual_pointer_v1: seat.virtual_pointer,
+        });
 
         for (axis, amount) in should_scroll {
-            virtual_pointer.axis(0, axis, amount);
-            virtual_pointer.frame();
+            conn.send(ZwlrVirtualPointerV1Request::Axis {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                time,
+                axis,
+                value: wayland::Fixed::from(amount as f32),
+            });
+            conn.send(ZwlrVirtualPointerV1Request::Frame {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            });
         }
 
-        if let Some(btn) = should_press {
-            if seat.buttons_down.insert(btn) {
-                virtual_pointer.button(0, btn, ButtonState::Pressed);
-                virtual_pointer.frame();
+        if let Some(button) = should_press {
+            if seat.buttons_down.insert(button) {
+                conn.send(ZwlrVirtualPointerV1Request::Button {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                    time,
+                    button,
+                    state: WlPointer::BUTTON_STATE_PRESSED,
+                });
+                conn.send(ZwlrVirtualPointerV1Request::Frame {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                });
             }
         }
 
-        if let Some(btn) = should_release {
-            if seat.buttons_down.remove(&btn) {
-                virtual_pointer.button(0, btn, ButtonState::Released);
-                virtual_pointer.frame();
+        if let Some(button) = should_release {
+            if seat.buttons_down.remove(&button) {
+                conn.send(ZwlrVirtualPointerV1Request::Button {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                    time,
+                    button,
+                    state: WlPointer::BUTTON_STATE_RELEASED,
+                });
+                conn.send(ZwlrVirtualPointerV1Request::Frame {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                });
             }
         }
     }
@@ -324,20 +340,19 @@ fn handle_key_pressed(state: &mut App, key: u32, seat_id: SeatId, qhandle: &Queu
 fn draw(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
-    qhandle: &QueueHandle<App>,
+    conn: &mut Connection,
     scale: u32,
     surface: &Surface,
     region: Region,
 ) -> Result<()> {
-    let wl_surface = surface.wl_surface.as_ref().unwrap();
     let buffer_data = make_buffer(
         globals,
         buffers,
-        qhandle,
+        conn,
         i32::try_from(surface.width * scale).unwrap(),
         i32::try_from(surface.height * scale).unwrap(),
         i32::try_from(surface.width * scale * 4).unwrap(),
-        Format::Argb8888,
+        WlShm::FORMAT_ABGR8888,
     )?;
     let buffer = &mut buffers[buffer_data];
     let mut pixmap = tiny_skia::PixmapMut::from_bytes(
@@ -363,12 +378,26 @@ fn draw(
         cross_color,
         cross_thickness,
     );
-    let wl_buffer = buffer.wl_buffer.as_ref().unwrap();
-    wl_surface.set_buffer_scale(i32::try_from(scale).unwrap());
-    wl_surface.attach(Some(wl_buffer), 0, 0);
-    wl_surface.damage_buffer(0, 0, i32::MAX, i32::MAX);
-    wl_surface.commit();
-
+    conn.send(WlSurfaceRequest::SetBufferScale {
+        wl_surface: surface.wl_surface,
+        scale: i32::try_from(scale).unwrap(),
+    });
+    conn.send(WlSurfaceRequest::Attach {
+        wl_surface: surface.wl_surface,
+        buffer: buffer.wl_buffer,
+        x: 0,
+        y: 0,
+    });
+    conn.send(WlSurfaceRequest::DamageBuffer {
+        wl_surface: surface.wl_surface,
+        x: 0,
+        y: 0,
+        width: i32::MAX,
+        height: i32::MAX,
+    });
+    conn.send(WlSurfaceRequest::Commit {
+        wl_surface: surface.wl_surface,
+    });
     Ok(())
 }
 
@@ -443,11 +472,11 @@ fn draw_inner(
 fn make_buffer(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
-    qhandle: &QueueHandle<App>,
+    conn: &mut Connection,
     width: i32,
     height: i32,
     stride: i32,
-    format: Format,
+    format: u32,
 ) -> Result<BufferId> {
     let buffer_id = buffers.insert(Buffer::default());
     let this = &mut buffers[buffer_id];
@@ -456,46 +485,224 @@ fn make_buffer(
     let len_usize = usize::try_from(len_i32).expect("buffer too big");
     memfd.as_file().write_all(&vec![0u8; len_i32 as usize])?;
     let borrowed_memfd = unsafe { BorrowedFd::borrow_raw(memfd.as_raw_fd()) };
-    let pool = globals
-        .wl_shm
-        .create_pool(borrowed_memfd, len_i32, qhandle, ());
-    let wl_buffer = pool.create_buffer(0, width, height, stride, format, qhandle, buffer_id);
+    let wl_shm_pool = conn.send_constructor(0, |id| WlShmRequest::CreatePool {
+        wl_shm: globals.wl_shm,
+        id,
+        fd: borrowed_memfd.as_fd().try_clone_to_owned().unwrap(),
+        size: len_i32,
+    });
+    let wl_buffer =
+        conn.send_constructor(buffer_id.into_raw(), |id| WlShmPoolRequest::CreateBuffer {
+            wl_shm_pool,
+            id,
+            offset: 0,
+            width,
+            height,
+            stride,
+            format,
+        });
     let mmap = unsafe { MmapOptions::new().len(len_usize).map_mut(memfd.as_file())? };
-    this.pool = Some(pool);
-    this.wl_buffer = Some(wl_buffer);
+    this.pool = wl_shm_pool;
+    this.wl_buffer = wl_buffer;
     this.mmap = Some(mmap);
     Ok(buffer_id)
 }
 
+#[derive(Debug)]
+struct IdAllocator<I: std::fmt::Debug> {
+    next: u32,
+    free: Vec<u32>,
+    data: Vec<I>,
+}
+
+impl<I: std::fmt::Debug> IdAllocator<I> {
+    fn new(first_id: u32) -> IdAllocator<I> {
+        Self {
+            next: first_id,
+            free: Vec::new(),
+            data: Vec::new(),
+        }
+    }
+
+    pub fn allocate(&mut self, data: I) -> u32 {
+        match self.free.pop() {
+            Some(id) => {
+                self.data[usize::try_from(id).unwrap() - 1] = data;
+                id
+            }
+            None => {
+                let id = self.next;
+                self.next += 1;
+                self.data.push(data);
+                id
+            }
+        }
+    }
+
+    pub fn release(&mut self, id: u32) {
+        self.free.push(id);
+    }
+
+    pub fn data_for(&self, id: u32) -> &I {
+        &self.data[usize::try_from(id).unwrap() - 1]
+    }
+}
+
+#[derive(Debug)]
+struct Connection {
+    wire: wayland::Connection,
+    ids: IdAllocator<ObjectData>,
+    sync_callback: WlCallback,
+    sync_done: bool,
+}
+
+#[derive(Debug)]
+struct ObjectData {
+    interface: Interface,
+    data: u64,
+}
+
+impl Connection {
+    fn send<'a>(&mut self, request: impl Into<Request<'a>>) {
+        let request = request.into();
+        // eprintln!("-> {request:?}");
+        Protocols::marshal_request(request, &mut self.wire)
+    }
+
+    fn send_constructor<'a, O, F, IR>(&mut self, data: u64, f: F) -> O
+    where
+        O: wayland::Object<Protocols>,
+        F: Fn(O) -> IR,
+        IR: Into<Request<'a>>,
+    {
+        let obj = self.create(data);
+        let request = f(obj).into();
+        // eprintln!("-> {request:?}");
+        request.marshal(&mut self.wire);
+        obj
+    }
+
+    fn create<O: wayland::Object<Protocols>>(&mut self, data: u64) -> O {
+        let id = self.ids.allocate(ObjectData {
+            interface: O::INTERFACE,
+            data,
+        });
+        O::new(id)
+    }
+
+    fn handle_events(&mut self, mut handler: impl FnMut(&mut Connection, Event)) {
+        while let Some(event) = self
+            .wire
+            .read_message(|msg| Event::unmarshal(self.ids.data_for(msg.object()).interface, msg))
+        {
+            // eprintln!("<- {event:?}");
+            match event {
+                Event::WlDisplay(WlDisplayEvent::DeleteId { wl_display: _, id }) => {
+                    self.ids.release(id);
+                }
+                Event::WlCallback(WlCallbackEvent::Done {
+                    wl_callback,
+                    callback_data: _,
+                }) if wl_callback == self.sync_callback => {
+                    self.sync_done = true;
+                }
+                _ => handler(self, event),
+            }
+        }
+    }
+
+    fn roundtrip(&mut self, mut handler: impl FnMut(&mut Connection, Event)) {
+        self.sync_done = false;
+        self.sync_callback = self.send_constructor(0, |callback| WlDisplayRequest::Sync {
+            wl_display: WlDisplay(1),
+            callback,
+        });
+        while !self.sync_done {
+            self.wire.flush_blocking().unwrap();
+            self.wire.read_blocking().unwrap();
+            self.handle_events(&mut handler);
+        }
+    }
+}
+
+impl AsFd for Connection {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.wire.as_fd()
+    }
+}
+
 fn main() -> Result<()> {
+    let wayland_fd = wayland::client_socket_from_env()?.context("no wayland display available")?;
+    let wire_conn = wayland::Connection::new(wayland_fd);
+    let mut conn = Connection {
+        wire: wire_conn,
+        ids: IdAllocator::new(1),
+        sync_callback: Default::default(),
+        sync_done: false,
+    };
+
+    let wl_display: WlDisplay = conn.create(0);
+    let wl_registry = conn.send_constructor(0, |registry| WlDisplayRequest::GetRegistry {
+        wl_display,
+        registry,
+    });
+    let mut global_list: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
+    conn.roundtrip(|_conn, event| match event {
+        Event::WlRegistry(WlRegistryEvent::Global {
+            wl_registry: r,
+            name,
+            interface,
+            version,
+        }) if r == wl_registry => {
+            global_list
+                .entry(interface.into_owned())
+                .or_default()
+                .push((name, version));
+        }
+        _ => {
+            eprintln!("warning: unexpected event: {event:?}")
+        }
+    });
+
+    fn bind_global<O: wayland::Object<Protocols>>(
+        conn: &mut Connection,
+        registry: WlRegistry,
+        globals: &HashMap<String, Vec<(u32, u32)>>,
+        version: RangeInclusive<u32>,
+    ) -> Option<O> {
+        for &(name, sversion) in globals.get(O::INTERFACE.name())? {
+            if &sversion >= version.start() {
+                return Some(conn.send_constructor(0, |new_id: O| {
+                    Request::WlRegistry(WlRegistryRequest::Bind {
+                        wl_registry: registry,
+                        name,
+                        interface: O::INTERFACE.name().into(),
+                        version: sversion.min(*version.end()),
+                        id: new_id.id(),
+                    })
+                }));
+            }
+        }
+        None
+    }
+
+    let globals = Globals {
+        wl_shm: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
+            .context("compositor doesn't support wl_shm")?,
+        wl_compositor: bind_global(&mut conn, wl_registry, &global_list, 4..=4)
+            .context("compositor doesn't support wl_compositor")?,
+        xdg_output: bind_global(&mut conn, wl_registry, &global_list, 3..=3)
+            .context("compositor doesn't support xdg_output_manager_v1")?,
+        layer_shell: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
+            .context("compositor doesn't support zwlr_layer_shell_v1")?,
+        virtual_pointer_manager: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
+            .unwrap_or_default(),
+    };
+
     let mut event_loop: calloop::EventLoop<'_, App> = calloop::EventLoop::try_new().unwrap();
-    let conn = Connection::connect_to_env()?;
-    let (global_list, queue) = registry_queue_init(&conn)?;
-    let qhandle = queue.handle();
-    let source = WaylandSource::new(conn, queue);
-    let dispatcher = calloop::Dispatcher::new(source, |(), queue, app| queue.dispatch_pending(app));
-    event_loop
-        .handle()
-        .register_dispatcher(dispatcher.clone())?;
     let mut app = App {
         loop_signal: event_loop.get_signal(),
-        globals: Globals {
-            wl_shm: global_list
-                .bind(&qhandle, 1..=1, ())
-                .context("compositor doesn't support wl_shm")?,
-            wl_compositor: global_list
-                .bind(&qhandle, 4..=4, ())
-                .context("compositor doesn't support wl_compositor")?,
-            xdg_output: global_list
-                .bind(&qhandle, 3..=3, ())
-                .context("compositor doesn't support xdg_output_manager_v1")?,
-            layer_shell: global_list
-                .bind(&qhandle, 1..=1, ())
-                .context("compositor doesn't support zwlr_layer_shell_v1")?,
-            virtual_pointer_manager: global_list
-                .bind::<ZwlrVirtualPointerManagerV1, _, _>(&qhandle, 1..=1, ())
-                .ok(),
-        },
+        globals,
         seats: TypedHandleMap::new(),
         outputs: TypedHandleMap::new(),
         buffers: TypedHandleMap::new(),
@@ -504,46 +711,63 @@ fn main() -> Result<()> {
         region_history: Vec::new(),
         global_bounds: Region::default(),
     };
-    global_list.contents().with_list(|list| {
-        for &Global {
-            name,
-            ref interface,
-            version,
-        } in list
-        {
-            let registry = global_list.registry();
-            match interface.as_str() {
-                "wl_seat" => {
-                    let seat_id = app.seats.insert(Seat::default());
-                    let wl_seat = registry.bind(name, version.max(1), &qhandle, seat_id);
-                    let seat = &mut app.seats[seat_id];
-                    if let Some(virtual_pointer_manager) = &app.globals.virtual_pointer_manager {
-                        let virtual_pointer = virtual_pointer_manager.create_virtual_pointer(
-                            Some(&wl_seat),
-                            &qhandle,
-                            (),
-                        );
-                        seat.virtual_pointer = Some(virtual_pointer);
-                    }
-                    seat.wl_seat = Some(wl_seat);
-                }
-                "wl_output" => {
-                    let output_id = app.outputs.insert(Output::default());
-                    let output = &mut app.outputs[output_id];
-                    let wl_output = registry.bind(name, version.max(1), &qhandle, output_id);
-                    let xdg_output = app
-                        .globals
-                        .xdg_output
-                        .get_xdg_output(&wl_output, &qhandle, output_id);
-                    output.wl_output = Some(wl_output);
-                    output.xdg_output = Some(xdg_output);
-                }
-                _ => {}
-            }
-        }
-    });
 
-    dispatcher.as_source_mut().queue().roundtrip(&mut app)?;
+    if let Some(seat_list) = global_list.get(Interface::WlSeat.name()) {
+        for &(name, sversion) in seat_list {
+            let seat_id = app.seats.insert(Seat::default());
+            let wl_seat = conn.send_constructor(seat_id.into_raw(), |WlSeat(id)| {
+                Request::WlRegistry(WlRegistryRequest::Bind {
+                    wl_registry,
+                    name,
+                    interface: Interface::WlSeat.name().into(),
+                    version: sversion.min(1),
+                    id,
+                })
+            });
+            let seat = &mut app.seats[seat_id];
+            if !app.globals.virtual_pointer_manager.is_null() {
+                let virtual_pointer = conn.send_constructor(0, |id| {
+                    Request::ZwlrVirtualPointerManagerV1(
+                        ZwlrVirtualPointerManagerV1Request::CreateVirtualPointer {
+                            zwlr_virtual_pointer_manager_v1: app.globals.virtual_pointer_manager,
+                            seat: wl_seat,
+                            id,
+                        },
+                    )
+                });
+                seat.virtual_pointer = virtual_pointer;
+            }
+            seat.wl_seat = wl_seat;
+        }
+    }
+    if let Some(output_list) = global_list.get(Interface::WlOutput.name()) {
+        for &(name, sversion) in output_list {
+            assert!(sversion >= 2);
+            let output_id = app.outputs.insert(Output::default());
+            let output = &mut app.outputs[output_id];
+            let wl_output = conn.send_constructor(output_id.into_raw(), |WlOutput(id)| {
+                Request::WlRegistry(WlRegistryRequest::Bind {
+                    wl_registry,
+                    name,
+                    interface: Interface::WlOutput.name().into(),
+                    version: sversion.min(2),
+                    id,
+                })
+            });
+            let xdg_output = conn.send_constructor(output_id.into_raw(), |id| {
+                Request::ZxdgOutputManagerV1(ZxdgOutputManagerV1Request::GetXdgOutput {
+                    zxdg_output_manager_v1: app.globals.xdg_output,
+                    id,
+                    output: wl_output,
+                })
+            });
+            output.wl_output = wl_output;
+            output.xdg_output = xdg_output;
+        }
+    }
+    conn.roundtrip(|conn, event| {
+        app.handle_event(conn, event);
+    });
 
     for output in app.outputs.iter() {
         app.global_bounds = app.global_bounds.union(&output.region());
@@ -554,303 +778,319 @@ fn main() -> Result<()> {
     for (output_id, output) in app.outputs.iter_mut_with_handles() {
         output.surface = Some(Surface::default());
         let surface = output.surface.as_mut().unwrap();
-        let wl_output = output.wl_output.as_ref().unwrap();
-        let wl_surface = app.globals.wl_compositor.create_surface(&qhandle, ());
-        let layer_surface = app.globals.layer_shell.get_layer_surface(
-            &wl_surface,
-            Some(wl_output),
-            Layer::Overlay,
-            String::from("waypoint"),
-            &qhandle,
-            output_id,
-        );
-        layer_surface.set_size(0, 0);
-        layer_surface.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
-        layer_surface.set_exclusive_zone(-1);
-        layer_surface.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
-        let region = app.globals.wl_compositor.create_region(&qhandle, ());
-        wl_surface.set_input_region(Some(&region));
-        wl_surface.commit();
+
+        let wl_surface = conn.send_constructor(0, |id| WlCompositorRequest::CreateSurface {
+            wl_compositor: app.globals.wl_compositor,
+            id,
+        });
+        let layer_surface = conn.send_constructor(output_id.into_raw(), |id| {
+            ZwlrLayerShellV1Request::GetLayerSurface {
+                zwlr_layer_shell_v1: app.globals.layer_shell,
+                id,
+                surface: wl_surface,
+                output: output.wl_output,
+                layer: ZwlrLayerShellV1::LAYER_OVERLAY,
+                namespace: "waypoint".into(),
+            }
+        });
+        conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+            zwlr_layer_surface_v1: layer_surface,
+            width: 0,
+            height: 0,
+        });
+        conn.send(ZwlrLayerSurfaceV1Request::SetAnchor {
+            zwlr_layer_surface_v1: layer_surface,
+            anchor: ZwlrLayerSurfaceV1::ANCHOR_TOP
+                | ZwlrLayerSurfaceV1::ANCHOR_BOTTOM
+                | ZwlrLayerSurfaceV1::ANCHOR_LEFT
+                | ZwlrLayerSurfaceV1::ANCHOR_RIGHT,
+        });
+        conn.send(ZwlrLayerSurfaceV1Request::SetExclusiveZone {
+            zwlr_layer_surface_v1: layer_surface,
+            zone: -1,
+        });
+        conn.send(ZwlrLayerSurfaceV1Request::SetKeyboardInteractivity {
+            zwlr_layer_surface_v1: layer_surface,
+            keyboard_interactivity: ZwlrLayerSurfaceV1::KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+        });
+        let region = conn.send_constructor(0, |id| WlCompositorRequest::CreateRegion {
+            wl_compositor: app.globals.wl_compositor,
+            id,
+        });
+        conn.send(WlSurfaceRequest::SetInputRegion { wl_surface, region });
+        conn.send(WlSurfaceRequest::Commit { wl_surface });
+
         surface.output = output_id;
-        surface.wl_surface = Some(wl_surface);
-        surface.layer_surface = Some(layer_surface);
+        surface.wl_surface = wl_surface;
+        surface.layer_surface = layer_surface;
     }
-    event_loop.run(None, &mut app, |_| {})?;
+
     for seat in app.seats.iter() {
-        for &button in &seat.buttons_down {
-            if let Some(virtual_pointer) = seat.virtual_pointer.as_ref() {
-                virtual_pointer.button(0, button, ButtonState::Released);
-                virtual_pointer.frame();
+        conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
+            zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            time: 0,
+            x: app.region.center().x as u32,
+            y: app.region.center().y as u32,
+            x_extent: app.global_bounds.width as u32,
+            y_extent: app.global_bounds.height as u32,
+        });
+        conn.send(ZwlrVirtualPointerV1Request::Frame {
+            zwlr_virtual_pointer_v1: seat.virtual_pointer,
+        });
+    }
+
+    conn.wire.flush_blocking()?;
+
+    let conn_source = Generic::new(conn, calloop::Interest::READ, calloop::Mode::Level);
+    let dispatcher = calloop::Dispatcher::new(
+        conn_source,
+        |_, conn: &mut calloop::generic::NoIoDrop<Connection>, app: &mut App| {
+            let conn = unsafe { conn.get_mut() };
+            conn.wire.read_nonblocking().unwrap();
+            // unsound: we can drop the connection inside the handler and leave a dangling fd
+            conn.handle_events(|conn, event| app.handle_event(conn, event));
+            Ok(calloop::PostAction::Continue)
+        },
+    );
+
+    event_loop
+        .handle()
+        .register_dispatcher(dispatcher.clone())?;
+
+    event_loop.run(None, &mut app, |_| {
+        let mut conn = dispatcher.as_source_mut();
+        // safety: we don't invalidate the fd in this block
+        let conn = unsafe { conn.get_mut() };
+        conn.wire.flush_blocking().unwrap();
+    })?;
+
+    {
+        let mut conn = dispatcher.as_source_mut();
+        // safety: we don't invalidate the fd in this block
+        let conn = unsafe { conn.get_mut() };
+
+        for seat in app.seats.iter() {
+            for &button in &seat.buttons_down {
+                conn.send(ZwlrVirtualPointerV1Request::Button {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                    time: 0,
+                    button,
+                    state: WlPointer::BUTTON_STATE_RELEASED,
+                });
+                conn.send(ZwlrVirtualPointerV1Request::Frame {
+                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                });
             }
         }
+
+        conn.wire.flush_blocking()?;
     }
-    dispatcher.as_source_mut().queue().flush()?;
+
     Ok(())
 }
 
-delegate_noop!(App: ignore WlShm);
-delegate_noop!(App: ignore WlShmPool);
-delegate_noop!(App: ignore WlCompositor);
-delegate_noop!(App: ignore WlRegion);
-delegate_noop!(App: ignore ZwlrLayerShellV1);
-delegate_noop!(App: ignore ZwlrVirtualPointerV1);
-delegate_noop!(App: ignore ZwlrVirtualPointerManagerV1);
-delegate_noop!(App: ignore ZxdgOutputManagerV1);
-
-impl Dispatch<WlRegistry, GlobalListContents> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlRegistry,
-        _event: wl_registry::Event,
-        _data: &GlobalListContents,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_registry::Event;
-        match _event {
-            Event::Global {
-                name: _,
-                interface: _,
-                version: _,
-            } => {}
-            Event::GlobalRemove { name: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlSeat, SeatId> for App {
-    fn event(
-        state: &mut Self,
-        proxy: &WlSeat,
-        event: wl_seat::Event,
-        &data: &SeatId,
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_seat::Event;
-        let this = &mut state.seats[data];
+impl App {
+    fn handle_event(&mut self, conn: &mut Connection, event: Event) {
         match event {
-            Event::Capabilities { capabilities } => {
-                let WEnum::Value(v) = capabilities else {
-                    return;
-                };
-                if v.contains(Capability::Keyboard) {
-                    this.keyboard = Some(proxy.get_keyboard(qhandle, data));
+            Event::WlSeat(event) => match event {
+                WlSeatEvent::Capabilities {
+                    wl_seat,
+                    capabilities,
+                } => {
+                    let seat_id = SeatId::from_raw(conn.ids.data_for(wl_seat.id()).data);
+                    let seat = &mut self.seats[seat_id];
+                    if capabilities & WlSeat::CAPABILITY_KEYBOARD != 0 {
+                        seat.keyboard = conn.send_constructor(seat_id.into_raw(), |id| {
+                            WlSeatRequest::GetKeyboard { wl_seat, id }
+                        });
+                    }
                 }
-            }
-            Event::Name { name: _ } => {}
-            _ => {}
-        }
-    }
-}
+            },
+            Event::WlKeyboard(event) => match event {
+                WlKeyboardEvent::Keymap {
+                    wl_keyboard,
+                    format,
+                    fd,
+                    size,
+                } => {
+                    if format == WlKeyboard::KEYMAP_FORMAT_XKB_V1 {
+                        let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                        let seat = &mut self.seats[seat_id];
+                        let keymap = unsafe {
+                            xkb::Keymap::new_from_fd(
+                                &seat.xkb,
+                                fd.into_raw_fd(),
+                                size as usize,
+                                xkb::KEYMAP_FORMAT_TEXT_V1,
+                                xkb::COMPILE_NO_FLAGS,
+                            )
+                        }
+                        .ok()
+                        .flatten();
+                        if let Some(keymap) = keymap.as_ref() {
+                            seat.xkb_state = Some(xkb::State::new(keymap));
+                            (seat.mod_indices, seat.specialized_bindings) =
+                                specialize_bindings(keymap, &self.config);
+                        }
+                    }
+                }
+                WlKeyboardEvent::Enter { .. } => {}
+                WlKeyboardEvent::Leave { .. } => {}
+                WlKeyboardEvent::Key {
+                    wl_keyboard,
+                    serial: _,
+                    time,
+                    key,
+                    state,
+                } => {
+                    let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                    if state == WlKeyboard::KEY_STATE_PRESSED {
+                        handle_key_pressed(self, time, key, seat_id, conn);
+                    }
+                }
+                WlKeyboardEvent::Modifiers {
+                    wl_keyboard,
+                    serial: _,
+                    mods_depressed,
+                    mods_latched,
+                    mods_locked,
+                    group,
+                } => {
+                    let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                    let seat = &mut self.seats[seat_id];
+                    let state = seat.xkb_state.as_mut().unwrap();
+                    state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                }
+            },
+            Event::WlOutput(event) => match event {
+                WlOutputEvent::Geometry { .. } => {}
+                WlOutputEvent::Mode { .. } => {}
+                WlOutputEvent::Done { wl_output } => {
+                    let output_id = OutputId::from_raw(conn.ids.data_for(wl_output.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    output.state.commit();
+                }
+                WlOutputEvent::Scale { wl_output, factor } => {
+                    let output_id = OutputId::from_raw(conn.ids.data_for(wl_output.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    output.state.pending.integer_scale =
+                        u32::try_from(factor).expect("negative scale factor");
+                }
+            },
+            Event::ZxdgOutputV1(event) => match event {
+                ZxdgOutputV1Event::LogicalPosition {
+                    zxdg_output_v1,
+                    x,
+                    y,
+                } => {
+                    let output_id = OutputId::from_raw(conn.ids.data_for(zxdg_output_v1.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    output.state.pending.logical_x = x;
+                    output.state.pending.logical_y = y;
+                }
+                ZxdgOutputV1Event::LogicalSize {
+                    zxdg_output_v1,
+                    width,
+                    height,
+                } => {
+                    let output_id = OutputId::from_raw(conn.ids.data_for(zxdg_output_v1.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    output.state.pending.logical_width = width;
+                    output.state.pending.logical_height = height;
+                }
+                ZxdgOutputV1Event::Done { .. } => {}
+                ZxdgOutputV1Event::Name { .. } => {}
+                ZxdgOutputV1Event::Description { .. } => {}
+            },
 
-impl Dispatch<WlKeyboard, SeatId> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlKeyboard,
-        event: wl_keyboard::Event,
-        &data: &SeatId,
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_keyboard::Event;
-        let this = &mut state.seats[data];
-        match event {
-            Event::Keymap {
-                format: WEnum::Value(KeymapFormat::XkbV1),
-                fd,
-                size,
-            } => {
-                let keymap = unsafe {
-                    xkb::Keymap::new_from_fd(
-                        &this.xkb,
-                        fd.into_raw_fd(),
-                        size as usize,
-                        xkb::KEYMAP_FORMAT_TEXT_V1,
-                        xkb::COMPILE_NO_FLAGS,
+            Event::WlSurface(event) => match event {
+                WlSurfaceEvent::Enter { .. } => {}
+                WlSurfaceEvent::Leave { .. } => {}
+            },
+            Event::ZwlrLayerSurfaceV1(event) => match event {
+                ZwlrLayerSurfaceV1Event::Configure {
+                    zwlr_layer_surface_v1,
+                    serial,
+                    width,
+                    height,
+                } => {
+                    let output_id =
+                        OutputId::from_raw(conn.ids.data_for(zwlr_layer_surface_v1.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    let surface = output.surface.as_mut().unwrap();
+                    conn.send(ZwlrLayerSurfaceV1Request::AckConfigure {
+                        zwlr_layer_surface_v1,
+                        serial,
+                    });
+                    conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+                        zwlr_layer_surface_v1,
+                        width,
+                        height,
+                    });
+                    surface.width = width;
+                    surface.height = height;
+                    draw(
+                        &self.globals,
+                        &mut self.buffers,
+                        conn,
+                        output.state.current.as_ref().unwrap().integer_scale,
+                        surface,
+                        Region {
+                            x: self.region.x - output.state.current.unwrap().logical_x,
+                            y: self.region.y - output.state.current.unwrap().logical_y,
+                            ..self.region
+                        },
                     )
+                    .unwrap();
                 }
-                .ok()
-                .flatten();
-                if let Some(keymap) = keymap.as_ref() {
-                    this.xkb_state = Some(xkb::State::new(keymap));
-                    (this.mod_indices, this.specialized_bindings) =
-                        specialize_bindings(keymap, &state.config);
+                ZwlrLayerSurfaceV1Event::Closed {
+                    zwlr_layer_surface_v1,
+                } => {
+                    let output_id =
+                        OutputId::from_raw(conn.ids.data_for(zwlr_layer_surface_v1.id()).data);
+                    let output = &mut self.outputs[output_id];
+                    output.surface = None;
                 }
-            }
-            Event::Enter {
-                serial: _,
-                surface: _,
-                keys: _,
-            } => {}
-            Event::Leave {
-                serial: _,
-                surface: _,
-            } => {}
-            Event::Key {
-                serial: _,
-                time: _,
-                key,
-                state: WEnum::Value(KeyState::Pressed),
-            } => {
-                handle_key_pressed(state, key, data, qhandle);
-            }
-            Event::Modifiers {
-                serial: _,
-                mods_depressed,
-                mods_latched,
-                mods_locked,
-                group,
-            } => {
-                let state = this.xkb_state.as_mut().unwrap();
-                state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
-            }
-            Event::RepeatInfo { rate: _, delay: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlOutput, OutputId> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &WlOutput,
-        event: wl_output::Event,
-        &data: &OutputId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_output::Event;
-        let this = &mut state.outputs[data];
-        match event {
-            Event::Geometry { .. } => {}
-            Event::Mode { .. } => {}
-            Event::Done => {
-                this.state.commit();
-            }
-            Event::Scale { factor } => {
-                this.state.pending.integer_scale =
-                    u32::try_from(factor).expect("negative scale factor");
-            }
-            Event::Name { .. } => {}
-            Event::Description { .. } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZxdgOutputV1, OutputId> for App {
-    fn event(
-        state: &mut Self,
-        _proxy: &ZxdgOutputV1,
-        event: zxdg_output_v1::Event,
-        &data: &OutputId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use zxdg_output_v1::Event;
-        let this = &mut state.outputs[data];
-        match event {
-            Event::LogicalPosition { x, y } => {
-                this.state.pending.logical_x = x;
-                this.state.pending.logical_y = y;
-            }
-            Event::LogicalSize { width, height } => {
-                this.state.pending.logical_width = width;
-                this.state.pending.logical_height = height;
-            }
-            Event::Done => {
-                // ignored; see spec
-            }
-            Event::Name { .. } => {}
-            Event::Description { .. } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlSurface, ()> for App {
-    fn event(
-        _state: &mut Self,
-        _proxy: &WlSurface,
-        event: wl_surface::Event,
-        &(): &(),
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wl_surface::Event;
-        match event {
-            Event::Enter { output: _ } => {}
-            Event::Leave { output: _ } => {}
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<ZwlrLayerSurfaceV1, OutputId> for App {
-    fn event(
-        state: &mut Self,
-        proxy: &ZwlrLayerSurfaceV1,
-        event: zwlr_layer_surface_v1::Event,
-        &output_id: &OutputId,
-        _conn: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        use zwlr_layer_surface_v1::Event;
-        let output = &mut state.outputs[output_id];
-        match event {
-            Event::Configure {
-                serial,
-                width,
-                height,
-            } => {
-                let surface = output.surface.as_mut().unwrap();
-                proxy.ack_configure(serial);
-                proxy.set_size(width, height);
-                surface.width = width;
-                surface.height = height;
-                draw(
-                    &state.globals,
-                    &mut state.buffers,
-                    qhandle,
-                    output.state.current.as_ref().unwrap().integer_scale,
-                    surface,
-                    Region {
-                        x: state.region.x - output.state.current.unwrap().logical_x,
-                        y: state.region.y - output.state.current.unwrap().logical_y,
-                        ..state.region
-                    },
-                )
-                .unwrap();
-            }
-            Event::Closed => {
-                output.surface = None;
-            }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<WlBuffer, BufferId> for App {
-    fn event(
-        state: &mut Self,
-        wl_buffer: &WlBuffer,
-        event: wl_buffer::Event,
-        &buffer_id: &BufferId,
-        _conn: &Connection,
-        _qhandle: &QueueHandle<Self>,
-    ) {
-        use wayland_client::protocol::wl_buffer::Event;
-        let this = &mut state.buffers[buffer_id];
-        match event {
-            Event::Release => {
-                let wl_shm_pool = this.pool.as_ref().unwrap();
-                wl_shm_pool.destroy();
-                wl_buffer.destroy();
-                state.buffers.remove(buffer_id);
-            }
-            _ => {}
+            },
+            Event::WlBuffer(event) => match event {
+                WlBufferEvent::Release { wl_buffer } => {
+                    let buffer_id = BufferId::from_raw(conn.ids.data_for(wl_buffer.id()).data);
+                    let buffer = &mut self.buffers[buffer_id];
+                    conn.send(WlShmPoolRequest::Destroy {
+                        wl_shm_pool: buffer.pool,
+                    });
+                    conn.send(WlBufferRequest::Destroy { wl_buffer });
+                    self.buffers.remove(buffer_id);
+                }
+            },
+            Event::WlShm(event) => match event {
+                WlShmEvent::Format { .. } => {}
+            },
+            Event::WlCallback(event) => match event {
+                WlCallbackEvent::Done { .. } => {}
+            },
+            Event::WlDisplay(event) => match event {
+                WlDisplayEvent::Error { .. } => {}
+                WlDisplayEvent::DeleteId { .. } => {}
+            },
+            Event::WlPointer(event) => match event {
+                WlPointerEvent::Enter { .. } => {}
+                WlPointerEvent::Leave { .. } => {}
+                WlPointerEvent::Motion { .. } => {}
+                WlPointerEvent::Button { .. } => {}
+                WlPointerEvent::Axis { .. } => {}
+            },
+            Event::WlRegistry(event) => match event {
+                WlRegistryEvent::Global { .. } => {}
+                WlRegistryEvent::GlobalRemove { .. } => {}
+            },
+            Event::WlTouch(event) => match event {
+                WlTouchEvent::Down { .. } => {}
+                WlTouchEvent::Up { .. } => {}
+                WlTouchEvent::Motion { .. } => {}
+                WlTouchEvent::Frame { .. } => {}
+                WlTouchEvent::Cancel { .. } => {}
+            },
         }
     }
 }

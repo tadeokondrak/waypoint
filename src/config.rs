@@ -2,7 +2,6 @@ use crate::ModIndices;
 use anyhow::{bail, ensure, Context, Result};
 use bitflags::bitflags;
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
-use wayland_client::protocol::wl_pointer::Axis;
 use xkbcommon::xkb;
 
 #[derive(Clone, Copy, Debug)]
@@ -29,7 +28,7 @@ pub(crate) enum Cmd {
     Release(Button),
     Cut(Direction),
     Move(Direction),
-    Scroll(Axis, f64),
+    Scroll(u32, f64),
 }
 
 bitflags! {
@@ -86,10 +85,22 @@ impl Cmd {
             "move-down" => Some(Cmd::Move(Direction::Down)),
             "move-left" => Some(Cmd::Move(Direction::Left)),
             "move-right" => Some(Cmd::Move(Direction::Right)),
-            "scroll-up" => Some(Cmd::Scroll(Axis::VerticalScroll, -10.0)),
-            "scroll-down" => Some(Cmd::Scroll(Axis::VerticalScroll, 10.0)),
-            "scroll-left" => Some(Cmd::Scroll(Axis::HorizontalScroll, -10.0)),
-            "scroll-right" => Some(Cmd::Scroll(Axis::HorizontalScroll, 10.0)),
+            "scroll-up" => Some(Cmd::Scroll(
+                crate::generated::WlPointer::AXIS_VERTICAL_SCROLL,
+                -10.0,
+            )),
+            "scroll-down" => Some(Cmd::Scroll(
+                crate::generated::WlPointer::AXIS_VERTICAL_SCROLL,
+                10.0,
+            )),
+            "scroll-left" => Some(Cmd::Scroll(
+                crate::generated::WlPointer::AXIS_HORIZONTAL_SCROLL,
+                -10.0,
+            )),
+            "scroll-right" => Some(Cmd::Scroll(
+                crate::generated::WlPointer::AXIS_HORIZONTAL_SCROLL,
+                10.0,
+            )),
             _ => None,
         }
     }
