@@ -1,0 +1,12 @@
+[package]
+name = "ei_scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+heck = "0.4.1"
+prettyplease = "0.2.16"
+proc-macro2 = { version = "1.0.78", default-features = false }
+quote = { version = "1.0.35", default-features = false }
+syn = { version = "2.0.50", default-features = false, features = ["parsing"] }
+txml = "0.1.0"

@@ -4,8 +4,8 @@ use circbuf::CircBuf;
 use rustix::{
     cmsg_space,
     event::{PollFd, PollFlags},
-    fd::{AsFd, BorrowedFd, FromRawFd, OwnedFd, RawFd},
-    io::{fcntl_getfd, fcntl_setfd, Errno, FdFlags},
+    fd::{AsFd, BorrowedFd, OwnedFd},
+    io::Errno,
     net::{
         connect_unix, recvmsg, sendmsg, AddressFamily, RecvAncillaryBuffer, RecvAncillaryMessage,
         RecvFlags, SendAncillaryBuffer, SendAncillaryMessage, SendFlags, SocketAddrUnix,
@@ -20,51 +20,15 @@ use std::{
 };
 
 pub fn client_socket_from_env() -> Result<Option<OwnedFd>, Errno> {
-    fn socket_fd_from_wayland_socket_env() -> Option<OwnedFd> {
-        let socket = std::env::var_os("WAYLAND_SOCKET")?;
-        std::env::remove_var("WAYLAND_SOCKET");
-        let Some(socket) = socket.to_str() else {
-            eprintln!(
-                "warning: WAYLAND_SOCKET could not be parsed as a file descriptor so it was ignored"
-            );
-            return None;
-        };
-        let Ok(fd) = socket.parse::<RawFd>() else {
-            eprintln!(
-                "warning: WAYLAND_SOCKET could not be parsed as a file descriptor so it was ignored"
-            );
-            return None;
-        };
-        let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-        match fcntl_getfd(&fd) {
-            Err(e) => {
-                eprintln!(
-                    "warning: fcntl(F_GETFD) on WAYLAND_SOCKET failed ({e}) so it was ignored"
-                );
-                return None;
-            }
-            Ok(flags) => {
-                match fcntl_setfd(&fd, flags | FdFlags::CLOEXEC) {
-                    Err(e) => {
-                        eprintln!("warning: fcntl(F_SETFD) on WAYLAND_SOCKET failed ({e}) so it was ignored");
-                        return None;
-                    }
-                    Ok(()) => {}
-                }
-            }
-        };
-        Some(fd)
-    }
-
     fn socket_path_from_wayland_display_env() -> Option<Vec<u8>> {
-        let display = std::env::var_os("WAYLAND_DISPLAY")?;
+        let display = std::env::var_os("LIBEI_SOCKET")?;
         let display = display.into_vec();
         if display[0] == b'/' {
             return Some(display);
         }
         let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") else {
             eprintln!(
-                "warning: WAYLAND_DISPLAY was not an absolute path and XDG_RUNTIME_PATH is unset"
+                "warning: LIBEI_SOCKET was not an absolute path and XDG_RUNTIME_PATH is unset"
             );
             return None;
         };
@@ -81,9 +45,8 @@ pub fn client_socket_from_env() -> Result<Option<OwnedFd>, Errno> {
         Ok(fd)
     }
 
-    socket_fd_from_wayland_socket_env()
-        .map(Ok)
-        .or_else(|| socket_path_from_wayland_display_env().map(socket_fd_from_socket_path))
+    socket_path_from_wayland_display_env()
+        .map(socket_fd_from_socket_path)
         .transpose()
 }
 
@@ -213,36 +176,37 @@ impl Connection {
 
     pub fn write_message<'a>(
         &mut self,
-        obj: u32,
-        op: u16,
+        obj: u64,
+        op: u32,
         args: &[Arg<'a>],
         fds: impl IntoIterator<Item = OwnedFd>,
     ) {
         let bytes_len = args
             .iter()
             .map(|it| match it {
-                Arg::Int(_) | Arg::Uint(_) | Arg::Fixed(_) => 4,
+                Arg::Int32(_) | Arg::Uint32(_) | Arg::Float(_) => 4,
+                Arg::Int64(_) | Arg::Uint64(_) => 8,
                 Arg::String(Some(s)) => 4 + (s.len() + 4) / 4 * 4,
                 Arg::String(None) => 4,
                 Arg::Array(s) => 4 + (s.len() + 3) / 4 * 4,
             })
             .sum::<usize>();
         self.write_fds.extend(fds);
-        assert!(bytes_len < usize::from(u16::MAX - 8));
-        let size = u16::from(8 + bytes_len as u16);
-        while self.write_buf.avail() < size.into() {
+        assert!(bytes_len < (u32::MAX - 16) as usize);
+        let size = u32::from(16 + bytes_len as u32);
+        while self.write_buf.avail() < size as usize {
             self.write_buf.grow().unwrap();
         }
         self.write_buf.write_all(&obj.to_ne_bytes()).unwrap();
-        self.write_buf
-            .write_all(&((u32::from(size) << 16) | u32::from(op)).to_ne_bytes())
-            .unwrap();
+        self.write_buf.write_all(&size.to_ne_bytes()).unwrap();
+        self.write_buf.write_all(&op.to_ne_bytes()).unwrap();
         for &arg in args {
             match arg {
-                Arg::Int(v) | Arg::Fixed(Fixed(v)) => {
-                    self.write_buf.write_all(&v.to_ne_bytes()).unwrap()
-                }
-                Arg::Uint(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
+                Arg::Float(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
+                Arg::Int32(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
+                Arg::Uint32(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
+                Arg::Int64(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
+                Arg::Uint64(v) => self.write_buf.write_all(&v.to_ne_bytes()).unwrap(),
                 Arg::String(None) => self.write_buf.write_all(&0u32.to_ne_bytes()).unwrap(),
                 Arg::String(Some(s)) => {
                     let s_len = u32::try_from(s.len() + 1).unwrap();
@@ -268,21 +232,20 @@ impl Connection {
     where
         for<'a> F: Fn(Message<'a>) -> Option<Msg>,
     {
-        if self.read_buf.len() < 2 {
+        if self.read_buf.len() < 4 {
             return None;
         }
-        let mut buf = [0u8; 8];
+        let mut buf = [0u8; 16];
         self.read_buf.reader_peek().read_exact(&mut buf).unwrap();
-        let obj = u32::from_ne_bytes(buf[0..4].try_into().unwrap());
-        let size_op = u32::from_ne_bytes(buf[4..8].try_into().unwrap());
-        let size = (size_op >> 16) as u16;
-        let op = size_op as u16;
+        let obj = u64::from_ne_bytes(buf[0..8].try_into().unwrap());
+        let size = u32::from_ne_bytes(buf[8..12].try_into().unwrap());
+        let op = u32::from_ne_bytes(buf[12..16].try_into().unwrap());
         if self.read_buf.len() < usize::try_from(size).unwrap() {
             return None;
         }
-        let buf_bytes = self.read_buf.get_bytes_upto_size(size.into());
+        let buf_bytes = self.read_buf.get_bytes_upto_size(size as usize);
         let mut data = SplitSlice(buf_bytes);
-        data.advance(8);
+        data.advance(16);
         let msg = decoder(Message {
             object: obj,
             opcode: op,
@@ -290,7 +253,7 @@ impl Connection {
             fds: &mut self.read_fds,
         })
         .expect("decoder failed!");
-        self.read_buf.advance_read_raw(usize::from(size));
+        self.read_buf.advance_read_raw(size as usize);
         Some(msg)
     }
 }
@@ -330,29 +293,39 @@ impl Read for SplitSlice<'_> {
 
 #[derive(Debug)]
 pub struct Message<'a> {
-    object: u32,
-    opcode: u16,
+    object: u64,
+    opcode: u32,
     data: SplitSlice<'a>,
     fds: &'a mut VecDeque<OwnedFd>,
 }
 
 impl<'a> Message<'a> {
-    pub fn read_int(&mut self) -> Option<i32> {
-        self.read_uint().map(|i| i as i32)
+    pub fn read_int32(&mut self) -> Option<i32> {
+        self.read_uint32().map(|i| i as i32)
     }
 
-    pub fn read_uint(&mut self) -> Option<u32> {
+    pub fn read_uint32(&mut self) -> Option<u32> {
         let mut buf = [0u8; 4];
         self.data.read_exact(&mut buf).ok()?;
         Some(u32::from_ne_bytes(buf))
     }
 
-    pub fn read_fixed(&mut self) -> Option<Fixed> {
-        self.read_int().map(Fixed)
+    pub fn read_int64(&mut self) -> Option<i64> {
+        self.read_uint64().map(|i| i as i64)
+    }
+
+    pub fn read_uint64(&mut self) -> Option<u64> {
+        let mut buf = [0u8; 8];
+        self.data.read_exact(&mut buf).ok()?;
+        Some(u64::from_ne_bytes(buf))
+    }
+
+    pub fn read_float(&mut self) -> Option<f32> {
+        self.read_uint32().map(f32::from_bits)
     }
 
     pub fn read_string(&mut self) -> Option<Option<String>> {
-        let length = self.read_uint()?;
+        let length = self.read_uint32()?;
         if length == 0 {
             Some(None)
         } else {
@@ -364,7 +337,7 @@ impl<'a> Message<'a> {
     }
 
     pub fn read_array(&mut self) -> Option<Vec<u8>> {
-        let length = self.read_uint()?;
+        let length = self.read_uint32()?;
         let mut buf = vec![0u8; usize::try_from(length / 4 * 4).unwrap()];
         self.data.read_exact(&mut buf).ok()?;
         buf.truncate(usize::try_from(length).unwrap());
@@ -375,11 +348,11 @@ impl<'a> Message<'a> {
         self.fds.pop_back()
     }
 
-    pub fn object(&self) -> u32 {
+    pub fn object(&self) -> u64 {
         self.object
     }
 
-    pub fn opcode(&self) -> u16 {
+    pub fn opcode(&self) -> u32 {
         self.opcode
     }
 }
@@ -388,45 +361,17 @@ pub trait Object<I>: Debug + Copy {
     const INTERFACE: I;
     type Request<'a>: Debug;
     type Event<'a>: Debug;
-    fn new(id: u32) -> Self;
-    fn id(self) -> u32;
-    fn is_null(self) -> bool {
-        self.id() == 0
-    }
+    fn new(id: u64) -> Self;
+    fn id(self) -> u64;
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum Arg<'a> {
-    Int(i32),
-    Uint(u32),
-    Fixed(Fixed),
+    Int32(i32),
+    Uint32(u32),
+    Int64(i64),
+    Uint64(u64),
+    Float(f32),
     Array(&'a [u8]),
     String(Option<&'a str>),
-}
-
-#[derive(Clone, Copy)]
-pub struct Fixed(pub i32);
-
-impl Debug for Fixed {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Fixed").field(&f32::from(*self)).finish()
-    }
-}
-
-impl From<Fixed> for f32 {
-    fn from(Fixed(v): Fixed) -> f32 {
-        v as f32 / 128.0
-    }
-}
-
-impl From<f32> for Fixed {
-    fn from(value: f32) -> Fixed {
-        Fixed((value * 128.0) as i32)
-    }
-}
-
-impl From<i32> for Fixed {
-    fn from(value: i32) -> Fixed {
-        Fixed(value.checked_mul(128).unwrap())
-    }
 }
