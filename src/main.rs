@@ -1,8 +1,13 @@
 #![allow(clippy::single_match, clippy::match_single_binding)]
 
-mod generated {
+mod wl_gen {
     #![allow(unused)]
     include!(concat!(env!("OUT_DIR"), "/wayland.rs"));
+}
+
+mod ei_gen {
+    #![allow(unused)]
+    include!(concat!(env!("OUT_DIR"), "/ei.rs"));
 }
 
 extern crate waypoint_scfg as scfg;
@@ -16,33 +21,44 @@ use crate::{
 };
 use anyhow::{Context as _, Result};
 use bytemuck::{Pod, Zeroable};
-use calloop::{
-    generic::{Generic, NoIoDrop},
-    LoopSignal,
-};
-use generated::{
-    Event, Interface, Protocols, Request, WlBuffer, WlBufferEvent, WlBufferRequest, WlCallback,
-    WlCallbackEvent, WlCompositor, WlCompositorRequest, WlDisplay, WlDisplayEvent,
-    WlDisplayRequest, WlKeyboard, WlKeyboardEvent, WlOutput, WlOutputEvent, WlPointer,
-    WlPointerEvent, WlRegistry, WlRegistryEvent, WlRegistryRequest, WlSeat, WlSeatEvent,
-    WlSeatRequest, WlShm, WlShmEvent, WlShmPool, WlShmPoolRequest, WlShmRequest, WlSurface,
-    WlSurfaceEvent, WlSurfaceRequest, WlTouchEvent, ZwlrLayerShellV1, ZwlrLayerShellV1Request,
-    ZwlrLayerSurfaceV1, ZwlrLayerSurfaceV1Event, ZwlrLayerSurfaceV1Request,
-    ZwlrVirtualPointerManagerV1, ZwlrVirtualPointerManagerV1Request, ZwlrVirtualPointerV1,
-    ZwlrVirtualPointerV1Request, ZxdgOutputManagerV1, ZxdgOutputManagerV1Request, ZxdgOutputV1,
-    ZxdgOutputV1Event,
+use ei::Object as _;
+use ei_gen::{
+    EiButton, EiButtonEvent, EiButtonRequest, EiCallbackEvent, EiConnectionEvent, EiDevice,
+    EiDeviceEvent, EiDeviceRequest, EiHandshake, EiHandshakeEvent, EiHandshakeRequest,
+    EiPingpongRequest, EiPointerAbsolute, EiPointerAbsoluteEvent, EiPointerAbsoluteRequest,
+    EiScroll, EiScrollEvent, EiScrollRequest, EiSeatEvent, EiSeatRequest,
+    EI_BUTTON_BUTTON_STATE_PRESS, EI_BUTTON_BUTTON_STATE_RELEASED,
+    EI_HANDSHAKE_CONTEXT_TYPE_SENDER,
 };
 use handy::typed::{TypedHandle, TypedHandleMap};
 use memmap2::{MmapMut, MmapOptions};
-use reis::{ei, Interface as _};
+use rustix::event::{PollFd, PollFlags};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
     ops::RangeInclusive,
     os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd},
+    time::{Duration, Instant},
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
-use wayland::{Object as _, Protocols as _};
+use wayland::Object as _;
+use wl_gen::{
+    Event, Request, WlBuffer, WlBufferEvent, WlBufferRequest, WlCallback, WlCallbackEvent,
+    WlCompositor, WlCompositorRequest, WlDisplay, WlDisplayEvent, WlDisplayRequest, WlKeyboard,
+    WlKeyboardEvent, WlOutput, WlOutputEvent, WlPointerEvent, WlRegistry, WlRegistryEvent,
+    WlRegistryRequest, WlSeat, WlSeatEvent, WlSeatRequest, WlShm, WlShmEvent, WlShmPool,
+    WlShmPoolRequest, WlShmRequest, WlSurface, WlSurfaceEvent, WlSurfaceRequest, WlTouchEvent,
+    ZwlrLayerShellV1, ZwlrLayerShellV1Request, ZwlrLayerSurfaceV1, ZwlrLayerSurfaceV1Event,
+    ZwlrLayerSurfaceV1Request, ZwlrVirtualPointerManagerV1, ZwlrVirtualPointerManagerV1Request,
+    ZwlrVirtualPointerV1, ZwlrVirtualPointerV1Request, ZxdgOutputManagerV1,
+    ZxdgOutputManagerV1Request, ZxdgOutputV1, ZxdgOutputV1Event, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
+    WL_KEYBOARD_KEY_STATE_PRESSED, WL_KEYBOARD_KEY_STATE_RELEASED,
+    WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_VERTICAL_SCROLL,
+    WL_POINTER_BUTTON_STATE_PRESSED, WL_POINTER_BUTTON_STATE_RELEASED, WL_SEAT_CAPABILITY_KEYBOARD,
+    WL_SHM_FORMAT_ABGR8888, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM,
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT, ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
+    ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+};
 use xkbcommon::xkb;
 
 type SeatId = TypedHandle<Seat>;
@@ -50,7 +66,7 @@ type OutputId = TypedHandle<Output>;
 type BufferId = TypedHandle<Buffer>;
 
 struct App {
-    loop_signal: LoopSignal,
+    quit: bool,
     globals: Globals,
     seats: TypedHandleMap<Seat>,
     outputs: TypedHandleMap<Output>,
@@ -66,133 +82,16 @@ struct App {
 struct EiState {
     sequence: u32,
     last_serial: u32,
-    seats: HashMap<u64, EiSeat>,
-    devices: HashMap<u64, EiDevice>,
+    seat_capabilities: HashMap<u64, u64>,
+    devices: HashMap<u64, EiDeviceInterfaces>,
 }
 
-struct EiSeat {
-    capabilities: u64,
-}
-
-struct EiDevice {
-    ei_device: ei::Device,
-    pointer_absolute: Option<ei::PointerAbsolute>,
-    button: Option<ei::Button>,
-    scroll: Option<ei::Scroll>,
-}
-
-impl App {
-    fn handle_ei_event(&mut self, ev: ei::Event) {
-        use ei::Event as E;
-        #[cfg(debug_assertions)]
-        {
-            if std::env::var("EI_DEBUG").is_ok_and(|v| v != "0") {
-                eprintln!("<- {ev:?}");
-            }
-        }
-        match ev {
-            E::Handshake(handshake, event) => {
-                use ei::handshake::Event as E;
-                match event {
-                    E::HandshakeVersion { version } => {
-                        handshake.handshake_version(version);
-                        handshake.context_type(ei::handshake::ContextType::Sender);
-                        handshake.name("waypoint");
-                        handshake.interface_version("ei_callback", 1);
-                        handshake.interface_version("ei_connection", 1);
-                        handshake.interface_version("ei_seat", 1);
-                        handshake.interface_version("ei_device", 1);
-                        handshake.interface_version("ei_pingpong", 1);
-                        handshake.interface_version("ei_pointer_absolute", 1);
-                        handshake.interface_version("ei_button", 1);
-                        handshake.interface_version("ei_scroll", 1);
-                        handshake.finish();
-                    }
-                    E::Connection { serial, .. } => {
-                        self.ei_state.last_serial = serial;
-                    }
-                    _ => {}
-                }
-            }
-            E::Connection(_connection, event) => {
-                use ei::connection::Event as E;
-                match event {
-                    E::Seat { seat } => {
-                        let id = seat.as_object().id();
-                        self.ei_state.seats.insert(
-                            id,
-                            EiSeat {
-                                capabilities: 0,
-                            },
-                        );
-                    }
-                    E::Ping { ping } => {
-                        ping.done(0);
-                    }
-                    _ => {}
-                }
-            }
-            E::Seat(seat, event) => {
-                use ei::seat::Event as E;
-                let seat_data = self.ei_state.seats.get_mut(&seat.as_object().id()).unwrap();
-                match event {
-                    E::Capability { mask, interface } => match interface.as_str() {
-                        "ei_pointer_absolute" | "ei_button" | "ei_scroll" => {
-                            seat_data.capabilities |= mask;
-                        }
-                        _ => {}
-                    },
-                    E::Done => {
-                        seat.bind(seat_data.capabilities);
-                    }
-                    E::Device { device } => {
-                        let id = device.as_object().id();
-                        self.ei_state.devices.insert(
-                            id,
-                            EiDevice {
-                                ei_device: device,
-                                pointer_absolute: None,
-                                button: None,
-                                scroll: None,
-                            },
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            E::Device(device, event) => {
-                use ei::device::Event as E;
-                let device_data = self
-                    .ei_state
-                    .devices
-                    .get_mut(&device.as_object().id())
-                    .unwrap();
-                match event {
-                    E::Interface { object } => match object.interface() {
-                        "ei_pointer_absolute" => {
-                            device_data.pointer_absolute =
-                                Some(object.downcast::<ei::PointerAbsolute>().unwrap());
-                        }
-                        "ei_button" => {
-                            device_data.button = Some(object.downcast::<ei::Button>().unwrap());
-                        }
-                        "ei_scroll" => {
-                            device_data.scroll = Some(object.downcast::<ei::Scroll>().unwrap());
-                        }
-                        _ => {}
-                    },
-                    E::Done => {
-                        device.start_emulating(self.ei_state.sequence, self.ei_state.last_serial);
-                        self.ei_state.sequence += 1;
-                        device.frame(self.ei_state.last_serial, 0);
-                        device.stop_emulating(self.ei_state.last_serial);
-                    }
-                    _ => {}
-                }
-            }
-            _ => {}
-        }
-    }
+#[derive(Default)]
+struct EiDeviceInterfaces {
+    device: EiDevice,
+    pointer_absolute: EiPointerAbsolute,
+    button: EiButton,
+    scroll: EiScroll,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -225,6 +124,9 @@ struct Seat {
     buttons_down: HashSet<u32>,
     mod_indices: ModIndices,
     specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>,
+    repeat_period: Duration,
+    repeat_delay: Duration,
+    key_repeat: Option<(Instant, xkb::Keycode)>,
 }
 
 #[derive(Default)]
@@ -289,6 +191,9 @@ impl Default for Seat {
             buttons_down: Default::default(),
             mod_indices: Default::default(),
             specialized_bindings: Default::default(),
+            key_repeat: Default::default(),
+            repeat_period: Default::default(),
+            repeat_delay: Default::default(),
         }
     }
 }
@@ -310,7 +215,8 @@ fn handle_key_pressed(
     time: u32,
     key: u32,
     seat_id: SeatId,
-    conn: &mut Connection,
+    conn: &mut WaylandConnection,
+    ei_conn: Option<&mut LibeiConnection>,
 ) {
     fn update(
         region: &mut Region,
@@ -357,7 +263,7 @@ fn handle_key_pressed(
     {
         match *cmd {
             Cmd::Quit => {
-                state.loop_signal.stop();
+                state.quit = true;
             }
             Cmd::Undo => {
                 if let Some(region) = state.region_history.pop() {
@@ -389,7 +295,7 @@ fn handle_key_pressed(
             Cmd::Click(btn) => {
                 should_press = Some(btn.code());
                 should_release = Some(btn.code());
-                state.loop_signal.stop();
+                state.quit = true;
             }
             Cmd::Press(btn) => {
                 should_press = Some(btn.code());
@@ -451,7 +357,7 @@ fn handle_key_pressed(
                     zwlr_virtual_pointer_v1: seat.virtual_pointer,
                     time,
                     button,
-                    state: WlPointer::BUTTON_STATE_PRESSED,
+                    state: WL_POINTER_BUTTON_STATE_PRESSED,
                 });
                 conn.send(ZwlrVirtualPointerV1Request::Frame {
                     zwlr_virtual_pointer_v1: seat.virtual_pointer,
@@ -465,69 +371,103 @@ fn handle_key_pressed(
                     zwlr_virtual_pointer_v1: seat.virtual_pointer,
                     time,
                     button,
-                    state: WlPointer::BUTTON_STATE_RELEASED,
+                    state: WL_POINTER_BUTTON_STATE_RELEASED,
                 });
                 conn.send(ZwlrVirtualPointerV1Request::Frame {
                     zwlr_virtual_pointer_v1: seat.virtual_pointer,
                 });
             }
         }
-    } else if let Some(device) = state.ei_state.devices.values().next() {
-        if let EiDevice {
-            ei_device,
-            pointer_absolute: Some(pointer_absolute),
-            button: Some(button),
-            scroll: Some(scroll),
-        } = device
-        {
-            ei_device.start_emulating(state.ei_state.sequence, state.ei_state.last_serial);
-            state.ei_state.sequence += 1;
+    } else if let (
+        Some(ei_conn),
+        Some(&EiDeviceInterfaces {
+            device,
+            pointer_absolute,
+            button,
+            scroll,
+        }),
+    ) = (ei_conn, state.ei_state.devices.values().next())
+    {
+        ei_conn.send(EiDeviceRequest::StartEmulating {
+            ei_device: device,
+            last_serial: state.ei_state.last_serial,
+            sequence: state.ei_state.sequence,
+        });
+        state.ei_state.sequence += 1;
 
-            pointer_absolute.motion_absolute(
-                state.region.center().x as f32,
-                state.region.center().y as f32,
-            );
-            ei_device.frame(state.ei_state.last_serial, time.into());
+        ei_conn.send(EiPointerAbsoluteRequest::MotionAbsolute {
+            ei_pointer_absolute: pointer_absolute,
+            x: state.region.center().x as f32,
+            y: state.region.center().y as f32,
+        });
+        ei_conn.send(EiDeviceRequest::Frame {
+            ei_device: device,
+            last_serial: state.ei_state.last_serial,
+            timestamp: time.into(),
+        });
 
-            for (axis, amount) in should_scroll {
-                scroll.scroll(
-                    if axis == WlPointer::AXIS_HORIZONTAL_SCROLL {
-                        amount as f32
-                    } else {
-                        0.0
-                    },
-                    if axis == WlPointer::AXIS_VERTICAL_SCROLL {
-                        amount as f32
-                    } else {
-                        0.0
-                    },
-                );
-                ei_device.frame(state.ei_state.last_serial, time.into());
-            }
-
-            if let Some(button_index) = should_press {
-                if seat.buttons_down.insert(button_index) {
-                    button.button(button_index, ei::button::ButtonState::Press);
-                    ei_device.frame(state.ei_state.last_serial, time.into());
-                }
-            }
-
-            if let Some(button_index) = should_release {
-                if seat.buttons_down.remove(&button_index) {
-                    button.button(button_index, ei::button::ButtonState::Released);
-                    ei_device.frame(state.ei_state.last_serial, time.into());
-                }
-            }
-
-            ei_device.stop_emulating(state.ei_state.last_serial);
+        for (axis, amount) in should_scroll {
+            ei_conn.send(EiScrollRequest::Scroll {
+                ei_scroll: scroll,
+                x: if axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL {
+                    amount as f32
+                } else {
+                    0.0
+                },
+                y: if axis == WL_POINTER_AXIS_VERTICAL_SCROLL {
+                    amount as f32
+                } else {
+                    0.0
+                },
+            });
+            ei_conn.send(EiDeviceRequest::Frame {
+                ei_device: device,
+                last_serial: state.ei_state.last_serial,
+                timestamp: time.into(),
+            });
         }
+
+        if let Some(button_index) = should_press {
+            if seat.buttons_down.insert(button_index) {
+                ei_conn.send(EiButtonRequest::Button {
+                    ei_button: button,
+                    button: button_index,
+                    state: EI_BUTTON_BUTTON_STATE_PRESS,
+                });
+                ei_conn.send(EiDeviceRequest::Frame {
+                    ei_device: device,
+                    last_serial: state.ei_state.last_serial,
+                    timestamp: time.into(),
+                });
+            }
+        }
+
+        if let Some(button_index) = should_release {
+            if seat.buttons_down.remove(&button_index) {
+                ei_conn.send(EiButtonRequest::Button {
+                    ei_button: button,
+                    button: button_index,
+                    state: EI_BUTTON_BUTTON_STATE_RELEASED,
+                });
+                ei_conn.send(EiDeviceRequest::Frame {
+                    ei_device: device,
+                    last_serial: state.ei_state.last_serial,
+                    timestamp: time.into(),
+                });
+            }
+        }
+
+        ei_conn.send(EiDeviceRequest::StopEmulating {
+            ei_device: device,
+            last_serial: state.ei_state.last_serial,
+        });
     }
 }
 
 fn draw(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
-    conn: &mut Connection,
+    conn: &mut WaylandConnection,
     scale: u32,
     surface: &Surface,
     region: Region,
@@ -539,7 +479,7 @@ fn draw(
         i32::try_from(surface.width * scale).unwrap(),
         i32::try_from(surface.height * scale).unwrap(),
         i32::try_from(surface.width * scale * 4).unwrap(),
-        WlShm::FORMAT_ABGR8888,
+        WL_SHM_FORMAT_ABGR8888,
     )?;
     let buffer = &mut buffers[buffer_data];
     let mut pixmap = tiny_skia::PixmapMut::from_bytes(
@@ -659,7 +599,7 @@ fn draw_inner(
 fn make_buffer(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
-    conn: &mut Connection,
+    conn: &mut WaylandConnection,
     width: i32,
     height: i32,
     stride: i32,
@@ -703,9 +643,9 @@ struct IdAllocator<I: std::fmt::Debug> {
 }
 
 impl<I: std::fmt::Debug> IdAllocator<I> {
-    fn new(first_id: u32) -> IdAllocator<I> {
+    fn new() -> IdAllocator<I> {
         Self {
-            next: first_id,
+            next: 1,
             free: Vec::new(),
             data: Vec::new(),
         }
@@ -736,7 +676,50 @@ impl<I: std::fmt::Debug> IdAllocator<I> {
 }
 
 #[derive(Debug)]
-struct Connection {
+struct LibeiConnection {
+    wire: ei::Connection,
+    next_id: u64,
+    interfaces: HashMap<u64, ei_gen::Interface>,
+}
+
+impl LibeiConnection {
+    fn send<'a>(&mut self, request: impl Into<ei_gen::Request<'a>>) {
+        let request = request.into();
+        #[cfg(debug_assertions)]
+        {
+            if std::env::var("LIBEI_DEBUG").is_ok_and(|v| v != "0") {
+                eprintln!("-> {request:?}");
+            }
+        }
+        request.marshal(&mut self.wire);
+    }
+
+    fn create<O: ei::Object<ei_gen::Interface>>(&mut self) -> O {
+        let id = self.next_id;
+        self.next_id += 1;
+        assert!(self.interfaces.insert(id, O::INTERFACE).is_none());
+        O::new(id)
+    }
+
+    fn handle_events(&mut self, mut handler: impl FnMut(&mut LibeiConnection, ei_gen::Event)) {
+        while let Some(event) = self.wire.read_message(|msg| {
+            ei_gen::Event::unmarshal(self.interfaces.get(&msg.object()).copied().unwrap(), msg)
+        }) {
+            #[cfg(debug_assertions)]
+            {
+                if std::env::var("LIBEI_DEBUG").is_ok_and(|v| v != "0") {
+                    eprintln!("<- {event:?}");
+                }
+            }
+            match event {
+                _ => handler(self, event),
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct WaylandConnection {
     wire: wayland::Connection,
     ids: IdAllocator<ObjectData>,
     sync_callback: WlCallback,
@@ -745,11 +728,11 @@ struct Connection {
 
 #[derive(Debug)]
 struct ObjectData {
-    interface: Interface,
+    interface: wl_gen::Interface,
     data: u64,
 }
 
-impl Connection {
+impl WaylandConnection {
     fn send<'a>(&mut self, request: impl Into<Request<'a>>) {
         let request = request.into();
         #[cfg(debug_assertions)]
@@ -758,12 +741,12 @@ impl Connection {
                 eprintln!("-> {request:?}");
             }
         }
-        Protocols::marshal_request(request, &mut self.wire)
+        request.marshal(&mut self.wire);
     }
 
     fn send_constructor<'a, O, F, IR>(&mut self, data: u64, f: F) -> O
     where
-        O: wayland::Object<Protocols>,
+        O: wayland::Object<wl_gen::Interface>,
         F: Fn(O) -> IR,
         IR: Into<Request<'a>>,
     {
@@ -779,7 +762,7 @@ impl Connection {
         obj
     }
 
-    fn create<O: wayland::Object<Protocols>>(&mut self, data: u64) -> O {
+    fn create<O: wayland::Object<wl_gen::Interface>>(&mut self, data: u64) -> O {
         let id = self.ids.allocate(ObjectData {
             interface: O::INTERFACE,
             data,
@@ -787,7 +770,7 @@ impl Connection {
         O::new(id)
     }
 
-    fn handle_events(&mut self, mut handler: impl FnMut(&mut Connection, Event)) {
+    fn handle_events(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event)) {
         while let Some(event) = self
             .wire
             .read_message(|msg| Event::unmarshal(self.ids.data_for(msg.object()).interface, msg))
@@ -813,7 +796,7 @@ impl Connection {
         }
     }
 
-    fn roundtrip(&mut self, mut handler: impl FnMut(&mut Connection, Event)) {
+    fn roundtrip(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event)) {
         self.sync_done = false;
         self.sync_callback = self.send_constructor(0, |callback| WlDisplayRequest::Sync {
             wl_display: WlDisplay(1),
@@ -827,29 +810,97 @@ impl Connection {
     }
 }
 
-impl AsFd for Connection {
-    fn as_fd(&self) -> BorrowedFd<'_> {
-        self.wire.as_fd()
+fn bind_global<O: wayland::Object<wl_gen::Interface>>(
+    conn: &mut WaylandConnection,
+    registry: WlRegistry,
+    globals: &HashMap<String, Vec<(u32, u32)>>,
+    version: RangeInclusive<u32>,
+) -> Option<O> {
+    for &(name, sversion) in globals.get(O::INTERFACE.name())? {
+        if &sversion >= version.start() {
+            return Some(conn.send_constructor(0, |new_id: O| {
+                Request::WlRegistry(WlRegistryRequest::Bind {
+                    wl_registry: registry,
+                    name,
+                    interface: O::INTERFACE.name().into(),
+                    version: sversion.min(*version.end()),
+                    id: new_id.id(),
+                })
+            }));
+        }
     }
+    None
 }
 
 fn main() -> Result<()> {
+    let ei_fd = ei::client_socket_from_env()?;
+    let ei_wire_conn = ei_fd.map(ei::Connection::new);
+    let mut ei_conn = ei_wire_conn.map(|wire| LibeiConnection {
+        wire,
+        next_id: 0,
+        interfaces: HashMap::new(),
+    });
+
+    if let Some(ei_conn) = ei_conn.as_mut() {
+        ei_conn.create::<EiHandshake>();
+        ei_conn.wire.read_blocking()?;
+        ei_conn.handle_events(|ei_conn, event| match event {
+            ei_gen::Event::EiHandshake(EiHandshakeEvent::HandshakeVersion {
+                ei_handshake,
+                version,
+            }) => {
+                ei_conn.send(EiHandshakeRequest::HandshakeVersion {
+                    ei_handshake,
+                    version,
+                });
+                ei_conn.send(EiHandshakeRequest::ContextType {
+                    ei_handshake,
+                    context_type: EI_HANDSHAKE_CONTEXT_TYPE_SENDER,
+                });
+                ei_conn.send(EiHandshakeRequest::Name {
+                    ei_handshake,
+                    name: "waypoint".into(),
+                });
+                for interface in [
+                    ei_gen::Interface::EiCallback,
+                    ei_gen::Interface::EiConnection,
+                    ei_gen::Interface::EiSeat,
+                    ei_gen::Interface::EiDevice,
+                    ei_gen::Interface::EiPingpong,
+                    ei_gen::Interface::EiPointerAbsolute,
+                    ei_gen::Interface::EiButton,
+                    ei_gen::Interface::EiScroll,
+                ] {
+                    ei_conn.send(EiHandshakeRequest::InterfaceVersion {
+                        ei_handshake,
+                        name: interface.name().into(),
+                        version: interface.version(),
+                    });
+                }
+                ei_conn.send(EiHandshakeRequest::Finish { ei_handshake });
+            }
+            _ => {
+                eprintln!("unexpected event {event:?} ignored");
+            }
+        });
+    }
+
     let wayland_fd = wayland::client_socket_from_env()?.context("no wayland display available")?;
-    let wire_conn = wayland::Connection::new(wayland_fd);
-    let mut conn = Connection {
-        wire: wire_conn,
-        ids: IdAllocator::new(1),
+    let wl_wire_conn = wayland::Connection::new(wayland_fd);
+    let mut wl_conn = WaylandConnection {
+        wire: wl_wire_conn,
+        ids: IdAllocator::new(),
         sync_callback: Default::default(),
         sync_done: false,
     };
 
-    let wl_display: WlDisplay = conn.create(0);
-    let wl_registry = conn.send_constructor(0, |registry| WlDisplayRequest::GetRegistry {
+    let wl_display: WlDisplay = wl_conn.create(0);
+    let wl_registry = wl_conn.send_constructor(0, |registry| WlDisplayRequest::GetRegistry {
         wl_display,
         registry,
     });
     let mut global_list: HashMap<String, Vec<(u32, u32)>> = HashMap::new();
-    conn.roundtrip(|_conn, event| match event {
+    wl_conn.roundtrip(|_conn, event| match event {
         Event::WlRegistry(WlRegistryEvent::Global {
             wl_registry: r,
             name,
@@ -866,76 +917,20 @@ fn main() -> Result<()> {
         }
     });
 
-    fn bind_global<O: wayland::Object<Protocols>>(
-        conn: &mut Connection,
-        registry: WlRegistry,
-        globals: &HashMap<String, Vec<(u32, u32)>>,
-        version: RangeInclusive<u32>,
-    ) -> Option<O> {
-        for &(name, sversion) in globals.get(O::INTERFACE.name())? {
-            if &sversion >= version.start() {
-                return Some(conn.send_constructor(0, |new_id: O| {
-                    Request::WlRegistry(WlRegistryRequest::Bind {
-                        wl_registry: registry,
-                        name,
-                        interface: O::INTERFACE.name().into(),
-                        version: sversion.min(*version.end()),
-                        id: new_id.id(),
-                    })
-                }));
-            }
-        }
-        None
-    }
-
-    let globals = Globals {
-        wl_shm: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
-            .context("compositor doesn't support wl_shm")?,
-        wl_compositor: bind_global(&mut conn, wl_registry, &global_list, 4..=4)
-            .context("compositor doesn't support wl_compositor")?,
-        xdg_output: bind_global(&mut conn, wl_registry, &global_list, 3..=3)
-            .context("compositor doesn't support xdg_output_manager_v1")?,
-        layer_shell: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
-            .context("compositor doesn't support zwlr_layer_shell_v1")?,
-        virtual_pointer_manager: bind_global(&mut conn, wl_registry, &global_list, 1..=1)
-            .unwrap_or_default(),
-    };
-
-    let mut event_loop: calloop::EventLoop<'_, App> = calloop::EventLoop::try_new().unwrap();
-    let eictx = ei::Context::connect_to_env().context("ei::Context::connect_to_env")?;
-    let mut ei_dispatcher = if let Some(eictx) = eictx {
-        let source = Generic::new(eictx, calloop::Interest::READ, calloop::Mode::Level);
-        let handler = |_readiness, context: &mut NoIoDrop<ei::Context>, app: &mut App| {
-            let eictx = unsafe { context.get_mut() };
-            if let Err(e) = eictx.read() {
-                eprintln!("ei read failed: {e}");
-                return Ok(calloop::PostAction::Remove);
-            }
-            while let Some(result) = context.pending_event() {
-                match result {
-                    reis::PendingRequestResult::Request(req) => app.handle_ei_event(req),
-                    reis::PendingRequestResult::ParseError(parse_error) => {
-                        panic!("ei parse error: {parse_error}");
-                    }
-                    reis::PendingRequestResult::InvalidObject(id) => {
-                        panic!("ei invalid object: {id}");
-                    }
-                }
-            }
-            context.flush()?;
-            Ok(calloop::PostAction::Continue)
-        };
-        let dispatcher = calloop::Dispatcher::new(source, handler);
-        event_loop
-            .handle()
-            .register_dispatcher(dispatcher.clone())?;
-        Some(dispatcher)
-    } else {
-        None
-    };
     let mut app = App {
-        loop_signal: event_loop.get_signal(),
-        globals,
+        quit: false,
+        globals: Globals {
+            wl_shm: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
+                .context("compositor doesn't support wl_shm")?,
+            wl_compositor: bind_global(&mut wl_conn, wl_registry, &global_list, 4..=4)
+                .context("compositor doesn't support wl_compositor")?,
+            xdg_output: bind_global(&mut wl_conn, wl_registry, &global_list, 3..=3)
+                .context("compositor doesn't support xdg_output_manager_v1")?,
+            layer_shell: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
+                .context("compositor doesn't support zwlr_layer_shell_v1")?,
+            virtual_pointer_manager: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
+                .unwrap_or_default(),
+        },
         seats: TypedHandleMap::new(),
         outputs: TypedHandleMap::new(),
         buffers: TypedHandleMap::new(),
@@ -946,21 +941,21 @@ fn main() -> Result<()> {
         ei_state: EiState::default(),
     };
 
-    if let Some(seat_list) = global_list.get(Interface::WlSeat.name()) {
+    if let Some(seat_list) = global_list.get(wl_gen::Interface::WlSeat.name()) {
         for &(name, sversion) in seat_list {
             let seat_id = app.seats.insert(Seat::default());
-            let wl_seat = conn.send_constructor(seat_id.into_raw(), |WlSeat(id)| {
+            let wl_seat = wl_conn.send_constructor(seat_id.into_raw(), |WlSeat(id)| {
                 Request::WlRegistry(WlRegistryRequest::Bind {
                     wl_registry,
                     name,
-                    interface: Interface::WlSeat.name().into(),
-                    version: sversion.min(1),
+                    interface: wl_gen::Interface::WlSeat.name().into(),
+                    version: sversion.min(4),
                     id,
                 })
             });
             let seat = &mut app.seats[seat_id];
             if !app.globals.virtual_pointer_manager.is_null() {
-                let virtual_pointer = conn.send_constructor(0, |id| {
+                let virtual_pointer = wl_conn.send_constructor(0, |id| {
                     Request::ZwlrVirtualPointerManagerV1(
                         ZwlrVirtualPointerManagerV1Request::CreateVirtualPointer {
                             zwlr_virtual_pointer_manager_v1: app.globals.virtual_pointer_manager,
@@ -974,21 +969,22 @@ fn main() -> Result<()> {
             seat.wl_seat = wl_seat;
         }
     }
-    if let Some(output_list) = global_list.get(Interface::WlOutput.name()) {
+
+    if let Some(output_list) = global_list.get(wl_gen::Interface::WlOutput.name()) {
         for &(name, sversion) in output_list {
             assert!(sversion >= 2);
             let output_id = app.outputs.insert(Output::default());
             let output = &mut app.outputs[output_id];
-            let wl_output = conn.send_constructor(output_id.into_raw(), |WlOutput(id)| {
+            let wl_output = wl_conn.send_constructor(output_id.into_raw(), |WlOutput(id)| {
                 Request::WlRegistry(WlRegistryRequest::Bind {
                     wl_registry,
                     name,
-                    interface: Interface::WlOutput.name().into(),
+                    interface: wl_gen::Interface::WlOutput.name().into(),
                     version: sversion.min(2),
                     id,
                 })
             });
-            let xdg_output = conn.send_constructor(output_id.into_raw(), |id| {
+            let xdg_output = wl_conn.send_constructor(output_id.into_raw(), |id| {
                 Request::ZxdgOutputManagerV1(ZxdgOutputManagerV1Request::GetXdgOutput {
                     zxdg_output_manager_v1: app.globals.xdg_output,
                     id,
@@ -999,8 +995,9 @@ fn main() -> Result<()> {
             output.xdg_output = xdg_output;
         }
     }
-    conn.roundtrip(|conn, event| {
-        app.handle_event(conn, event);
+
+    wl_conn.roundtrip(|conn, event| {
+        app.handle_event(conn, ei_conn.as_mut(), event);
     });
 
     for output in app.outputs.iter() {
@@ -1013,55 +1010,61 @@ fn main() -> Result<()> {
         output.surface = Some(Surface::default());
         let surface = output.surface.as_mut().unwrap();
 
-        let wl_surface = conn.send_constructor(0, |id| WlCompositorRequest::CreateSurface {
+        let wl_surface = wl_conn.send_constructor(0, |id| WlCompositorRequest::CreateSurface {
             wl_compositor: app.globals.wl_compositor,
             id,
         });
-        let layer_surface = conn.send_constructor(output_id.into_raw(), |id| {
+        let layer_surface = wl_conn.send_constructor(output_id.into_raw(), |id| {
             ZwlrLayerShellV1Request::GetLayerSurface {
                 zwlr_layer_shell_v1: app.globals.layer_shell,
                 id,
                 surface: wl_surface,
                 output: output.wl_output,
-                layer: ZwlrLayerShellV1::LAYER_OVERLAY,
+                layer: ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
                 namespace: "waypoint".into(),
             }
         });
-        conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetSize {
             zwlr_layer_surface_v1: layer_surface,
             width: 0,
             height: 0,
         });
-        conn.send(ZwlrLayerSurfaceV1Request::SetAnchor {
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetAnchor {
             zwlr_layer_surface_v1: layer_surface,
-            anchor: ZwlrLayerSurfaceV1::ANCHOR_TOP
-                | ZwlrLayerSurfaceV1::ANCHOR_BOTTOM
-                | ZwlrLayerSurfaceV1::ANCHOR_LEFT
-                | ZwlrLayerSurfaceV1::ANCHOR_RIGHT,
+            anchor: ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP
+                | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM
+                | ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT
+                | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
         });
-        conn.send(ZwlrLayerSurfaceV1Request::SetExclusiveZone {
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetExclusiveZone {
             zwlr_layer_surface_v1: layer_surface,
             zone: -1,
         });
-        conn.send(ZwlrLayerSurfaceV1Request::SetKeyboardInteractivity {
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetKeyboardInteractivity {
             zwlr_layer_surface_v1: layer_surface,
-            keyboard_interactivity: ZwlrLayerSurfaceV1::KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+            keyboard_interactivity: ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
         });
-        let region = conn.send_constructor(0, |id| WlCompositorRequest::CreateRegion {
+        let region = wl_conn.send_constructor(0, |id| WlCompositorRequest::CreateRegion {
             wl_compositor: app.globals.wl_compositor,
             id,
         });
-        conn.send(WlSurfaceRequest::SetInputRegion { wl_surface, region });
-        conn.send(WlSurfaceRequest::Commit { wl_surface });
+        wl_conn.send(WlSurfaceRequest::SetInputRegion { wl_surface, region });
+        wl_conn.send(WlSurfaceRequest::Commit { wl_surface });
 
         surface.output = output_id;
         surface.wl_surface = wl_surface;
         surface.layer_surface = layer_surface;
     }
 
+    if let Some(ei_conn) = ei_conn.as_mut() {
+        ei_conn.wire.flush_blocking()?;
+        ei_conn.wire.read_blocking()?;
+        ei_conn.handle_events(|ei_conn, event| app.handle_ei_event(ei_conn, event));
+    }
+
     for seat in app.seats.iter() {
         if !seat.virtual_pointer.is_null() {
-            conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
+            wl_conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
                 zwlr_virtual_pointer_v1: seat.virtual_pointer,
                 time: 0,
                 x: app.region.center().x as u32,
@@ -1069,69 +1072,284 @@ fn main() -> Result<()> {
                 x_extent: app.global_bounds.width as u32,
                 y_extent: app.global_bounds.height as u32,
             });
-            conn.send(ZwlrVirtualPointerV1Request::Frame {
+            wl_conn.send(ZwlrVirtualPointerV1Request::Frame {
                 zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            });
+        } else if let (
+            Some(ei_conn),
+            Some(&EiDeviceInterfaces {
+                device,
+                pointer_absolute,
+                ..
+            }),
+        ) = (ei_conn.as_mut(), app.ei_state.devices.values().next())
+        {
+            ei_conn.send(EiDeviceRequest::StartEmulating {
+                ei_device: device,
+                last_serial: app.ei_state.last_serial,
+                sequence: app.ei_state.sequence,
+            });
+            app.ei_state.sequence += 1;
+
+            ei_conn.send(EiPointerAbsoluteRequest::MotionAbsolute {
+                ei_pointer_absolute: pointer_absolute,
+                x: app.region.center().x as f32,
+                y: app.region.center().y as f32,
+            });
+            ei_conn.send(EiDeviceRequest::Frame {
+                ei_device: device,
+                last_serial: app.ei_state.last_serial,
+                timestamp: 0,
+            });
+
+            ei_conn.send(EiDeviceRequest::StopEmulating {
+                ei_device: device,
+                last_serial: app.ei_state.last_serial,
             });
         }
     }
 
-    conn.wire.flush_blocking()?;
+    wl_conn.wire.flush_blocking()?;
 
-    let conn_source = Generic::new(conn, calloop::Interest::READ, calloop::Mode::Level);
-    let dispatcher = calloop::Dispatcher::new(
-        conn_source,
-        |_, conn: &mut calloop::generic::NoIoDrop<Connection>, app: &mut App| {
-            let conn = unsafe { conn.get_mut() };
-            conn.wire.read_nonblocking().unwrap();
-            // unsound: we can drop the connection inside the handler and leave a dangling fd
-            conn.handle_events(|conn, event| app.handle_event(conn, event));
-            Ok(calloop::PostAction::Continue)
-        },
-    );
-
-    event_loop
-        .handle()
-        .register_dispatcher(dispatcher.clone())?;
-
-    event_loop.run(None, &mut app, |_| {
-        let mut conn = dispatcher.as_source_mut();
-        // safety: we don't invalidate the fd in this block
-        let conn = unsafe { conn.get_mut() };
-        if let Some(eiconn) = ei_dispatcher.as_mut() {
-            let mut eiconn = eiconn.as_source_mut();
-            let eiconn = unsafe { eiconn.get_mut() };
-            eiconn.flush().unwrap();
+    while !app.quit {
+        let now = Instant::now();
+        let next_timer = app
+            .seats
+            .iter()
+            .filter_map(|seat| seat.key_repeat)
+            .map(|(instant, _)| instant)
+            .min();
+        let timeout = match next_timer {
+            Some(instant) => instant.duration_since(now).as_millis() as i32,
+            None => -1,
+        };
+        let (wl_revents, ei_revents) = if let Some(ei_conn) = ei_conn.as_ref() {
+            let mut pollfds = [
+                PollFd::new(&wl_conn.wire, PollFlags::IN),
+                PollFd::new(&ei_conn.wire, PollFlags::IN),
+            ];
+            rustix::event::poll(&mut pollfds, timeout)?;
+            let wl_revents = pollfds[0].revents();
+            let ei_revents = pollfds[1].revents();
+            (wl_revents, ei_revents)
+        } else {
+            let mut pollfds = [PollFd::new(&wl_conn.wire, PollFlags::IN)];
+            rustix::event::poll(&mut pollfds, timeout)?;
+            let wl_revents = pollfds[0].revents();
+            (wl_revents, PollFlags::empty())
+        };
+        if wl_revents.contains(PollFlags::IN) {
+            wl_conn.wire.read_nonblocking()?;
+            wl_conn.handle_events(|conn, event| app.handle_event(conn, ei_conn.as_mut(), event));
         }
-        conn.wire.flush_blocking().unwrap();
-    })?;
-
-    {
-        let mut conn = dispatcher.as_source_mut();
-        // safety: we don't invalidate the fd in this block
-        let conn = unsafe { conn.get_mut() };
-
-        for seat in app.seats.iter() {
-            for &button in &seat.buttons_down {
-                conn.send(ZwlrVirtualPointerV1Request::Button {
-                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
-                    time: 0,
-                    button,
-                    state: WlPointer::BUTTON_STATE_RELEASED,
-                });
-                conn.send(ZwlrVirtualPointerV1Request::Frame {
-                    zwlr_virtual_pointer_v1: seat.virtual_pointer,
-                });
+        if ei_revents.contains(PollFlags::IN) {
+            let ei_conn = ei_conn.as_mut().unwrap();
+            ei_conn.wire.read_nonblocking()?;
+            ei_conn.handle_events(|ei_conn, event| app.handle_ei_event(ei_conn, event));
+        }
+        if let Some(ei_conn) = ei_conn.as_mut() {
+            ei_conn.wire.flush_blocking()?;
+        }
+        wl_conn.wire.flush_blocking()?;
+        let mut seats = Vec::new();
+        for (seat_id, seat) in app.seats.iter_mut_with_handles() {
+            if let Some((instant, _)) = seat.key_repeat {
+                if instant <= now {
+                    seats.push(seat_id);
+                }
             }
         }
-
-        conn.wire.flush_blocking()?;
+        for seat_id in seats {
+            let seat = &mut app.seats[seat_id];
+            let (instant, keycode) = seat.key_repeat.unwrap();
+            handle_key_pressed(
+                &mut app,
+                0,
+                keycode - 8,
+                seat_id,
+                &mut wl_conn,
+                ei_conn.as_mut(),
+            );
+            let seat = &mut app.seats[seat_id];
+            seat.key_repeat = Some((instant + seat.repeat_period, keycode))
+        }
     }
+
+    for seat in app.seats.iter() {
+        for &button in &seat.buttons_down {
+            wl_conn.send(ZwlrVirtualPointerV1Request::Button {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                time: 0,
+                button,
+                state: WL_POINTER_BUTTON_STATE_RELEASED,
+            });
+            wl_conn.send(ZwlrVirtualPointerV1Request::Frame {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+            });
+        }
+    }
+    wl_conn.wire.flush_blocking()?;
 
     Ok(())
 }
 
 impl App {
-    fn handle_event(&mut self, conn: &mut Connection, event: Event) {
+    fn handle_ei_event(&mut self, ei_conn: &mut LibeiConnection, event: ei_gen::Event) {
+        match event {
+            ei_gen::Event::EiHandshake(event) => match event {
+                EiHandshakeEvent::HandshakeVersion { .. } => {}
+                EiHandshakeEvent::InterfaceVersion { .. } => {}
+                EiHandshakeEvent::Connection {
+                    ei_handshake: _,
+                    serial,
+                    connection,
+                    version: _,
+                } => {
+                    ei_conn
+                        .interfaces
+                        .insert(connection.id(), ei_gen::Interface::EiConnection);
+                    self.ei_state.last_serial = serial;
+                }
+            },
+            ei_gen::Event::EiCallback(event) => match event {
+                EiCallbackEvent::Done { .. } => {}
+            },
+            ei_gen::Event::EiConnection(event) => match event {
+                EiConnectionEvent::Disconnected { .. } => {}
+                EiConnectionEvent::Seat {
+                    ei_connection: _,
+                    seat,
+                    version: _,
+                } => {
+                    ei_conn
+                        .interfaces
+                        .insert(seat.id(), ei_gen::Interface::EiSeat);
+                    self.ei_state.seat_capabilities.insert(seat.id(), 0);
+                }
+                EiConnectionEvent::InvalidObject {
+                    ei_connection: _,
+                    last_serial: _,
+                    invalid_id: _,
+                } => {}
+                EiConnectionEvent::Ping {
+                    ei_connection: _,
+                    ping,
+                    version: _,
+                } => {
+                    ei_conn.send(EiPingpongRequest::Done {
+                        ei_pingpong: ping,
+                        callback_data: 0,
+                    });
+                }
+            },
+            ei_gen::Event::EiDevice(event) => match event {
+                EiDeviceEvent::Destroyed { .. } => {}
+                EiDeviceEvent::Name { .. } => {}
+                EiDeviceEvent::DeviceType { .. } => {}
+                EiDeviceEvent::Dimensions { .. } => {}
+                EiDeviceEvent::Region { .. } => {}
+                EiDeviceEvent::Interface {
+                    ei_device,
+                    object,
+                    interface_name,
+                    version: _,
+                } => match interface_name.as_ref() {
+                    "ei_pointer_absolute" => {
+                        ei_conn
+                            .interfaces
+                            .insert(object, ei_gen::Interface::EiPointerAbsolute);
+                        let data = self.ei_state.devices.get_mut(&ei_device.id()).unwrap();
+                        data.pointer_absolute = EiPointerAbsolute(object);
+                    }
+                    "ei_button" => {
+                        ei_conn
+                            .interfaces
+                            .insert(object, ei_gen::Interface::EiButton);
+                        let data = self.ei_state.devices.get_mut(&ei_device.id()).unwrap();
+                        data.button = EiButton(object);
+                    }
+                    "ei_scroll" => {
+                        ei_conn
+                            .interfaces
+                            .insert(object, ei_gen::Interface::EiScroll);
+                        let data = self.ei_state.devices.get_mut(&ei_device.id()).unwrap();
+                        data.scroll = EiScroll(object);
+                    }
+                    _ => {
+                        unreachable!();
+                    }
+                },
+                EiDeviceEvent::Done { .. } => {}
+                EiDeviceEvent::Resumed { .. } => {}
+                EiDeviceEvent::Paused { .. } => {}
+                EiDeviceEvent::RegionMappingId { .. } => {}
+            },
+            ei_gen::Event::EiPingpong(event) => match event {},
+            ei_gen::Event::EiSeat(event) => match event {
+                EiSeatEvent::Destroyed { .. } => {}
+                EiSeatEvent::Name { .. } => {}
+                EiSeatEvent::Capability {
+                    ei_seat,
+                    mask,
+                    interface,
+                } => match interface.as_ref() {
+                    "ei_pointer_absolute" | "ei_button" | "ei_scroll" => {
+                        let caps = self
+                            .ei_state
+                            .seat_capabilities
+                            .get_mut(&ei_seat.id())
+                            .unwrap();
+                        *caps |= mask;
+                    }
+                    _ => {}
+                },
+                EiSeatEvent::Done { ei_seat } => {
+                    let capabilities = self
+                        .ei_state
+                        .seat_capabilities
+                        .get(&ei_seat.id())
+                        .copied()
+                        .unwrap();
+                    ei_conn.send(EiSeatRequest::Bind {
+                        ei_seat,
+                        capabilities,
+                    });
+                }
+                EiSeatEvent::Device {
+                    ei_seat: _,
+                    device,
+                    version: _,
+                } => {
+                    ei_conn
+                        .interfaces
+                        .insert(device.id(), ei_gen::Interface::EiDevice);
+                    self.ei_state.devices.insert(
+                        device.id(),
+                        EiDeviceInterfaces {
+                            device,
+                            ..EiDeviceInterfaces::default()
+                        },
+                    );
+                }
+            },
+            ei_gen::Event::EiButton(event) => match event {
+                EiButtonEvent::Destroyed { .. } => {}
+            },
+            ei_gen::Event::EiPointerAbsolute(event) => match event {
+                EiPointerAbsoluteEvent::Destroyed { .. } => {}
+            },
+            ei_gen::Event::EiScroll(event) => match event {
+                EiScrollEvent::Destroyed { .. } => {}
+            },
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        conn: &mut WaylandConnection,
+        ei_conn: Option<&mut LibeiConnection>,
+        event: Event,
+    ) {
         match event {
             Event::WlSeat(event) => match event {
                 WlSeatEvent::Capabilities {
@@ -1140,12 +1358,13 @@ impl App {
                 } => {
                     let seat_id = SeatId::from_raw(conn.ids.data_for(wl_seat.id()).data);
                     let seat = &mut self.seats[seat_id];
-                    if capabilities & WlSeat::CAPABILITY_KEYBOARD != 0 {
+                    if capabilities & WL_SEAT_CAPABILITY_KEYBOARD != 0 {
                         seat.keyboard = conn.send_constructor(seat_id.into_raw(), |id| {
                             WlSeatRequest::GetKeyboard { wl_seat, id }
                         });
                     }
                 }
+                WlSeatEvent::Name { .. } => {}
             },
             Event::WlKeyboard(event) => match event {
                 WlKeyboardEvent::Keymap {
@@ -1154,7 +1373,7 @@ impl App {
                     fd,
                     size,
                 } => {
-                    if format == WlKeyboard::KEYMAP_FORMAT_XKB_V1 {
+                    if format == WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1 {
                         let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
                         let seat = &mut self.seats[seat_id];
                         let keymap = unsafe {
@@ -1185,8 +1404,35 @@ impl App {
                     state,
                 } => {
                     let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
-                    if state == WlKeyboard::KEY_STATE_PRESSED {
-                        handle_key_pressed(self, time, key, seat_id, conn);
+                    let seat = &mut self.seats[seat_id];
+                    let key_repeat = seat.key_repeat;
+                    let keycode = key + 8;
+                    let keycode_repeats = seat
+                        .xkb_state
+                        .as_mut()
+                        .unwrap()
+                        .get_keymap()
+                        .key_repeats(keycode);
+                    let repeat_delay = seat.repeat_delay;
+
+                    if state == WL_KEYBOARD_KEY_STATE_PRESSED
+                        && (key_repeat.is_none() || key_repeat.is_some_and(|(_, it)| it != keycode))
+                    {
+                        handle_key_pressed(self, time, key, seat_id, conn, ei_conn);
+                        if keycode_repeats {
+                            let seat_id =
+                                SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                            let seat = &mut self.seats[seat_id];
+                            seat.key_repeat = Some((Instant::now() + repeat_delay, keycode));
+                        }
+                    }
+
+                    if state == WL_KEYBOARD_KEY_STATE_RELEASED
+                        && key_repeat.is_some_and(|(_, it)| it == keycode)
+                    {
+                        let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                        let seat = &mut self.seats[seat_id];
+                        seat.key_repeat = None;
                     }
                 }
                 WlKeyboardEvent::Modifiers {
@@ -1201,6 +1447,16 @@ impl App {
                     let seat = &mut self.seats[seat_id];
                     let state = seat.xkb_state.as_mut().unwrap();
                     state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                }
+                WlKeyboardEvent::RepeatInfo {
+                    wl_keyboard,
+                    rate,
+                    delay,
+                } => {
+                    let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
+                    let seat = &mut self.seats[seat_id];
+                    seat.repeat_period = Duration::from_millis(1000 / rate as u64);
+                    seat.repeat_delay = Duration::from_millis(delay as u64);
                 }
             },
             Event::WlOutput(event) => match event {
@@ -1297,9 +1553,8 @@ impl App {
                 WlBufferEvent::Release { wl_buffer } => {
                     let buffer_id = BufferId::from_raw(conn.ids.data_for(wl_buffer.id()).data);
                     let buffer = &mut self.buffers[buffer_id];
-                    conn.send(WlShmPoolRequest::Destroy {
-                        wl_shm_pool: buffer.pool,
-                    });
+                    let wl_shm_pool = buffer.pool;
+                    conn.send(WlShmPoolRequest::Destroy { wl_shm_pool });
                     conn.send(WlBufferRequest::Destroy { wl_buffer });
                     self.buffers.remove(buffer_id);
                 }

@@ -1,0 +1,8 @@
+[package]
+name = "ei"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+circbuf = "0.2.1"
+rustix = { version = "0.38.4", features = ["net", "event"] }

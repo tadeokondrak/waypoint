@@ -1,4 +1,7 @@
-use crate::ModIndices;
+use crate::{
+    wl_gen::{WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_VERTICAL_SCROLL},
+    ModIndices,
+};
 use anyhow::{bail, ensure, Context, Result};
 use bitflags::bitflags;
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
@@ -85,22 +88,10 @@ impl Cmd {
             "move-down" => Some(Cmd::Move(Direction::Down)),
             "move-left" => Some(Cmd::Move(Direction::Left)),
             "move-right" => Some(Cmd::Move(Direction::Right)),
-            "scroll-up" => Some(Cmd::Scroll(
-                crate::generated::WlPointer::AXIS_VERTICAL_SCROLL,
-                -10.0,
-            )),
-            "scroll-down" => Some(Cmd::Scroll(
-                crate::generated::WlPointer::AXIS_VERTICAL_SCROLL,
-                10.0,
-            )),
-            "scroll-left" => Some(Cmd::Scroll(
-                crate::generated::WlPointer::AXIS_HORIZONTAL_SCROLL,
-                -10.0,
-            )),
-            "scroll-right" => Some(Cmd::Scroll(
-                crate::generated::WlPointer::AXIS_HORIZONTAL_SCROLL,
-                10.0,
-            )),
+            "scroll-up" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, -10.0)),
+            "scroll-down" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, 10.0)),
+            "scroll-left" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, -10.0)),
+            "scroll-right" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, 10.0)),
             _ => None,
         }
     }

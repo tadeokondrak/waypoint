@@ -1,32 +1,41 @@
 mod protocol;
 
-use crate::protocol::{
-    Arg, ArgKind, Enum, Interface, Message, MessageKind, ParseContext, Protocol,
-};
+use crate::protocol::{Arg, ArgKind, Enum, Interface, Message, MessageKind, ParseContext};
 use heck::{ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote, ToTokens};
-use std::{
-    cmp::max,
-    collections::{BTreeMap, HashSet},
-    iter,
-    path::PathBuf,
-};
+use std::{cmp::max, collections::BTreeMap, iter, path::PathBuf};
+
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ContextType {
+    #[default]
+    Receiver,
+    Sender,
+}
 
 #[derive(Default)]
 pub struct Config {
+    pub context_type: Option<ContextType>,
     pub protocols: Vec<PathBuf>,
-    pub globals: Vec<(String, u32)>,
+    pub interfaces: BTreeMap<String, u32>,
 }
 
 impl Config {
+    pub fn context_type(&mut self, context_type: ContextType) -> &mut Self {
+        self.context_type = Some(context_type);
+        self
+    }
+
     pub fn protocol(&mut self, path: impl Into<PathBuf>) -> &mut Self {
         self.protocols.push(path.into());
         self
     }
 
-    pub fn global(&mut self, name: impl Into<String>, version: u32) -> &mut Self {
-        self.globals.push((name.into(), version));
+    pub fn interface(&mut self, name: impl Into<String>, version: u32) -> &mut Self {
+        assert!(
+            self.interfaces.insert(name.into(), version).is_none(),
+            "duplicate interface version"
+        );
         self
     }
 
@@ -42,7 +51,6 @@ impl Config {
                     attrs: None,
                 }
                 .parse()
-                .map(preprocess_protocol)
                 .unwrap()
             })
             .collect::<Vec<_>>();
@@ -55,45 +63,32 @@ impl Config {
 
         let dependency_graph = make_dependency_graph(&interfaces);
 
-        let global_allowlist = interfaces
-            .keys()
-            .filter(|interface| {
-                !dependency_graph.iter().any(|((_from, to), kind)| {
-                    interface == &to && kind == &DependencyKind::SameVersion
-                })
-            })
-            .cloned()
-            .collect::<HashSet<String>>();
-
-        for (global, version) in &self.globals {
-            let interface = &interfaces[global.as_str()];
+        for (name, version) in &self.interfaces {
+            let interface = &interfaces[name.as_str()];
             if interface.version < *version {
                 panic!(
-                    "version too high on {global}, want {version}, protocol has {}",
+                    "version too high on {name}, want {version}, protocol has {}",
                     interface.version
                 );
             }
-            if !global_allowlist.contains(global) {
-                panic!("{global} is not a global interface");
-            }
         }
 
-        let mut wanted_interfaces: BTreeMap<String, u32> = BTreeMap::new();
-        for (global, version) in &self.globals {
+        let mut wanted_interfaces: BTreeMap<String, DependencyKind> = BTreeMap::new();
+        for (global, version) in &self.interfaces {
             let &version = version;
-            wanted_interfaces.insert(global.clone(), version);
+            wanted_interfaces.insert(global.clone(), DependencyKind::Real);
 
             go(
                 &dependency_graph,
                 &mut wanted_interfaces,
                 global.clone(),
                 version,
-                DependencyKind::SameVersion,
+                DependencyKind::Real,
             );
 
             fn go<'a>(
                 dependency_graph: &BTreeMap<(String, String), DependencyKind>,
-                wanted_interfaces: &mut BTreeMap<String, u32>,
+                wanted_interfaces: &mut BTreeMap<String, DependencyKind>,
                 global: String,
                 version: u32,
                 dependency_kind: DependencyKind,
@@ -103,37 +98,26 @@ impl Config {
                     .take_while(|&((from, _), _)| from == &global);
                 for ((_, dependency), kind) in dependencies {
                     match kind.min(&dependency_kind) {
-                        DependencyKind::AnyVersion => {
-                            match wanted_interfaces.entry(dependency.clone()) {
-                                std::collections::btree_map::Entry::Vacant(entry) => {
-                                    entry.insert(0);
-                                }
-                                std::collections::btree_map::Entry::Occupied(_) => {}
-                            }
+                        DependencyKind::Dummy => {
+                            wanted_interfaces
+                                .entry(dependency.clone())
+                                .or_insert(DependencyKind::Dummy);
                             go(
                                 dependency_graph,
                                 wanted_interfaces,
                                 dependency.clone(),
                                 version,
-                                DependencyKind::AnyVersion,
+                                DependencyKind::Dummy,
                             );
                         }
-                        DependencyKind::SameVersion => {
-                            match wanted_interfaces.entry(dependency.clone()) {
-                                std::collections::btree_map::Entry::Vacant(entry) => {
-                                    entry.insert(version);
-                                }
-                                std::collections::btree_map::Entry::Occupied(mut entry) => {
-                                    let existing = *entry.get();
-                                    *entry.get_mut() = max(existing, version);
-                                }
-                            }
+                        DependencyKind::Real => {
+                            wanted_interfaces.insert(dependency.clone(), DependencyKind::Real);
                             go(
                                 dependency_graph,
                                 wanted_interfaces,
                                 dependency.clone(),
                                 version,
-                                DependencyKind::SameVersion,
+                                DependencyKind::Real,
                             );
                         }
                     }
@@ -141,10 +125,26 @@ impl Config {
             }
         }
 
-        let interfaces = preprocess_interfaces(interfaces, wanted_interfaces);
+        let wanted_interface_versions = wanted_interfaces
+            .into_iter()
+            .map(|(interface, kind)| match kind {
+                DependencyKind::Dummy => (interface, 0),
+                DependencyKind::Real => {
+                    let Some(&version) = self.interfaces.get(&interface) else {
+                        panic!("must specify interface version for {interface}")
+                    };
+                    (interface, version)
+                }
+            })
+            .collect::<BTreeMap<String, u32>>();
+
+        let interfaces = preprocess_interfaces(interfaces, wanted_interface_versions);
 
         let tokens = GenContext {
             interfaces: &interfaces,
+            context_type: self.context_type,
+            request_needs_lifetime: false,
+            event_needs_lifetime: false,
         }
         .gen();
 
@@ -176,8 +176,8 @@ fn preprocess_interfaces(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum DependencyKind {
-    AnyVersion,
-    SameVersion,
+    Dummy,
+    Real,
 }
 
 fn make_dependency_graph(
@@ -194,8 +194,8 @@ fn make_dependency_graph(
                         continue;
                     }
                     let dep_kind = match arg.kind {
-                        ArgKind::NewId => DependencyKind::SameVersion,
-                        ArgKind::Object => DependencyKind::AnyVersion,
+                        ArgKind::NewId => DependencyKind::Real,
+                        ArgKind::ObjectId => DependencyKind::Dummy,
                         _ => unreachable!(),
                     };
                     match dependency_graph.entry((interface.name.clone(), arg_interface.clone())) {
@@ -215,61 +215,29 @@ fn make_dependency_graph(
     dependency_graph
 }
 
-fn preprocess_protocol(mut protocol: Protocol) -> Protocol {
-    for interface in &mut protocol.interfaces {
-        for message in interface
-            .requests
-            .iter_mut()
-            .chain(interface.events.iter_mut())
-        {
-            let new_id_without_interface_arg_indices = message
-                .args
-                .iter()
-                .enumerate()
-                .filter(|(_i, arg)| arg.kind == ArgKind::NewId && arg.interface.is_none())
-                .map(|(i, _arg)| i)
-                .collect::<Vec<_>>();
-            for i in new_id_without_interface_arg_indices {
-                message.args.insert(
-                    i,
-                    Arg {
-                        name: "version".into(),
-                        kind: ArgKind::Uint,
-                        ..Arg::default()
-                    },
-                );
-                message.args.insert(
-                    i,
-                    Arg {
-                        name: "interface".into(),
-                        kind: ArgKind::String,
-                        ..Arg::default()
-                    },
-                );
-            }
-        }
-    }
-    protocol
-}
-
 struct GenContext<'a> {
     interfaces: &'a BTreeMap<String, Interface>,
+    context_type: Option<ContextType>,
+    request_needs_lifetime: bool,
+    event_needs_lifetime: bool,
 }
 
 impl<'a> GenContext<'a> {
-    fn gen(&self) -> TokenStream {
+    fn gen(mut self) -> TokenStream {
+        let interface_enum = self.gen_global_interface_enum();
+        let (request_enum, request_needs_lifetime) =
+            self.gen_global_message_enum(|interface| &interface.requests, MessageKind::Request);
+        let (event_enum, event_needs_lifetime) =
+            self.gen_global_message_enum(|interface| &interface.events, MessageKind::Event);
+        self.request_needs_lifetime = request_needs_lifetime;
+        self.event_needs_lifetime = event_needs_lifetime;
         let interfaces = self
             .interfaces
             .values()
             .map(|interface| self.gen_interface(interface));
-        let interface_enum = self.gen_global_interface_enum();
-        let request_enum =
-            self.gen_global_message_enum(|interface| &interface.requests, MessageKind::Request);
-        let event_enum =
-            self.gen_global_message_enum(|interface| &interface.events, MessageKind::Event);
         quote! {
-            extern crate wayland;
-            use wayland::{Arg, Connection, Message, Fixed, Object};
+            extern crate ei;
+            use ei::{Arg, Connection, Message, Object};
             #interface_enum
             #request_enum
             #event_enum
@@ -280,14 +248,16 @@ impl<'a> GenContext<'a> {
     fn gen_interface(&self, interface: &Interface) -> TokenStream {
         let type_name = format_ident!("{}", interface.name.to_upper_camel_case());
         let request_type_name = format_ident!("{}Request", interface.name.to_upper_camel_case());
-        let request_type_needs_lifetime = message_type_needs_lifetime(&interface.requests);
+        let request_type_needs_lifetime =
+            message_type_needs_lifetime(&interface.requests, self.context_type);
         let request_generics = if request_type_needs_lifetime {
             quote!(<'a>)
         } else {
             quote!()
         };
         let event_type_name = format_ident!("{}Event", interface.name.to_upper_camel_case());
-        let event_type_needs_lifetime = message_type_needs_lifetime(&interface.events);
+        let event_type_needs_lifetime =
+            message_type_needs_lifetime(&interface.events, self.context_type);
         let event_generics = if event_type_needs_lifetime {
             quote!(<'a>)
         } else {
@@ -295,7 +265,7 @@ impl<'a> GenContext<'a> {
         };
         let interface_struct = quote! {
             #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-            pub struct #type_name(pub u32);
+            pub struct #type_name(pub u64);
 
         };
         let interface_struct_object_impl = quote! {
@@ -303,8 +273,8 @@ impl<'a> GenContext<'a> {
                 const INTERFACE: Interface = Interface::#type_name;
                 type Request<'a> = #request_type_name #request_generics;
                 type Event<'a> = #event_type_name #event_generics;
-                fn new(id: u32) -> #type_name { #type_name(id) }
-                fn id(self) -> u32 { self.0 }
+                fn new(id: u64) -> #type_name { #type_name(id) }
+                fn id(self) -> u64 { self.0 }
             }
         };
 
@@ -340,10 +310,24 @@ impl<'a> GenContext<'a> {
         let type_name = format_ident!("{}{kind}", interface.name.to_upper_camel_case());
         let variants = messages
             .iter()
+            .filter(|msg| {
+                self.context_type.is_none() || msg.context_type.is_none() || {
+                    msg.context_type
+                        .is_some_and(|it| it == self.context_type.unwrap())
+                }
+            })
             .map(|message| self.gen_message_enum_variant(interface, message));
-        let type_needs_lifetime = message_type_needs_lifetime(messages);
+        let type_needs_lifetime = message_type_needs_lifetime(messages, self.context_type);
         let generic = if type_needs_lifetime {
             quote!('a)
+        } else {
+            quote!()
+        };
+        let global_generic = if match kind {
+            MessageKind::Request => self.request_needs_lifetime,
+            MessageKind::Event => self.event_needs_lifetime,
+        } {
+            quote!(<'a>)
         } else {
             quote!()
         };
@@ -358,8 +342,8 @@ impl<'a> GenContext<'a> {
             #reader
             #writer
             // TODO make this lifetime optional
-            impl<'a> From<#type_name #generics> for #global_enum_name<'a> {
-                fn from(v: #type_name #generics) -> #global_enum_name<'a> {
+            impl #global_generic From<#type_name #generics> for #global_enum_name #global_generic {
+                fn from(v: #type_name #generics) -> #global_enum_name #global_generic {
                     #global_enum_name::#interface_type_name(v)
                 }
             }
@@ -396,13 +380,15 @@ impl<'a> GenContext<'a> {
             return quote!(#type_name);
         }
         let tokens = match arg.kind {
-            ArgKind::NewId => quote!(u32),
-            ArgKind::Int => quote!(i32),
-            ArgKind::Uint => quote!(u32),
-            ArgKind::Fixed => quote!(Fixed),
+            ArgKind::NewId => quote!(u64),
+            ArgKind::Int32 => quote!(i32),
+            ArgKind::Uint32 => quote!(u32),
+            ArgKind::Int64 => quote!(i64),
+            ArgKind::Uint64 => quote!(u64),
+            ArgKind::Float => quote!(f32),
             ArgKind::String if arg.allow_null => quote!(Option<std::borrow::Cow<'a, str>>),
             ArgKind::String => quote!(std::borrow::Cow<'a, str>),
-            ArgKind::Object => quote!(u32),
+            ArgKind::ObjectId => quote!(u64),
             ArgKind::Array => quote!(std::borrow::Cow<'a, [u8]>),
             ArgKind::Fd => quote!(wayland::rustix::fd::OwnedFd),
         };
@@ -413,7 +399,7 @@ impl<'a> GenContext<'a> {
         &self,
         selector: impl for<'b> Fn(&'b Interface) -> &'b [Message],
         kind: MessageKind,
-    ) -> TokenStream {
+    ) -> (TokenStream, bool) {
         let type_name = format_ident!("{kind}");
         let mut any_variant_needs_lifetime = false;
         let enabled_interfaces = self
@@ -431,7 +417,8 @@ impl<'a> GenContext<'a> {
         let variants = enabled_interfaces
             .clone()
             .map(|interface| {
-                let needs_lifetime = message_type_needs_lifetime(selector(interface));
+                let needs_lifetime =
+                    message_type_needs_lifetime(selector(interface), self.context_type);
                 any_variant_needs_lifetime |= needs_lifetime;
                 self.gen_global_message_enum_variant(interface, kind, needs_lifetime)
             })
@@ -460,7 +447,7 @@ impl<'a> GenContext<'a> {
         } else {
             quote!()
         };
-        quote! {
+        let tokens = quote! {
             #[derive(Debug)]
             pub enum #type_name #generics {
                 #(#variants)*
@@ -478,7 +465,8 @@ impl<'a> GenContext<'a> {
                     }
                 }
             }
-        }
+        };
+        (tokens, any_variant_needs_lifetime)
     }
 
     fn gen_global_message_enum_variant(
@@ -522,15 +510,24 @@ impl<'a> GenContext<'a> {
         kind: MessageKind,
     ) -> TokenStream {
         let type_name = format_ident!("{}{kind}", interface.name.to_upper_camel_case());
-        let needs_lifetime = message_type_needs_lifetime(messages);
+        let needs_lifetime = message_type_needs_lifetime(messages, self.context_type);
         let generics = if needs_lifetime {
             quote!(<'a>)
         } else {
             quote!()
         };
-        let variants = messages.iter().enumerate().map(|(i, message)| {
-            self.gen_message_reader_variant(u16::try_from(i).unwrap(), interface, message, kind)
-        });
+        let variants = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| {
+                self.context_type.is_none() || msg.context_type.is_none() || {
+                    msg.context_type
+                        .is_some_and(|it| it == self.context_type.unwrap())
+                }
+            })
+            .map(|(i, message)| {
+                self.gen_message_reader_variant(u32::try_from(i).unwrap(), interface, message, kind)
+            });
         quote! {
             impl #generics #type_name #generics {
                 pub fn unmarshal(mut msg: Message<'_>) -> Option<#type_name #generics> {
@@ -550,15 +547,29 @@ impl<'a> GenContext<'a> {
         kind: MessageKind,
     ) -> TokenStream {
         let type_name = format_ident!("{}{kind}", interface.name.to_upper_camel_case());
-        let needs_lifetime = message_type_needs_lifetime(messages);
+        let needs_lifetime = message_type_needs_lifetime(messages, self.context_type);
         let generics = if needs_lifetime {
             quote!(<'a>)
         } else {
             quote!()
         };
-        let variants = messages.iter().enumerate().map(|(i, message)| {
-            self.gen_message_marshaler_variant(u16::try_from(i).unwrap(), interface, message, kind)
-        });
+        let variants = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, msg)| {
+                self.context_type.is_none() || msg.context_type.is_none() || {
+                    msg.context_type
+                        .is_some_and(|it| it == self.context_type.unwrap())
+                }
+            })
+            .map(|(i, message)| {
+                self.gen_message_marshaler_variant(
+                    u32::try_from(i).unwrap(),
+                    interface,
+                    message,
+                    kind,
+                )
+            });
         quote! {
             impl #generics #type_name #generics {
                 pub fn marshal(self, conn: &mut Connection) {
@@ -572,7 +583,7 @@ impl<'a> GenContext<'a> {
 
     fn gen_message_reader_variant(
         &self,
-        i: u16,
+        i: u32,
         interface: &Interface,
         message: &Message,
         kind: MessageKind,
@@ -595,7 +606,7 @@ impl<'a> GenContext<'a> {
 
     fn gen_message_marshaler_variant(
         &self,
-        i: u16,
+        i: u32,
         interface: &Interface,
         message: &Message,
         kind: MessageKind,
@@ -631,15 +642,17 @@ impl<'a> GenContext<'a> {
             .map(|(i, arg)| {
                 let ident = format_ident!("arg{i}");
                 match arg.kind {
-                    ArgKind::NewId => quote!(Arg::Uint(#ident)),
-                    ArgKind::Int => quote!(Arg::Int(#ident)),
-                    ArgKind::Uint => quote!(Arg::Uint(#ident)),
-                    ArgKind::Fixed => quote!(Arg::Fixed(#ident)),
+                    ArgKind::NewId => quote!(Arg::Uint64(#ident)),
+                    ArgKind::Int32 => quote!(Arg::Int32(#ident)),
+                    ArgKind::Uint32 => quote!(Arg::Uint32(#ident)),
+                    ArgKind::Int64 => quote!(Arg::Int64(#ident)),
+                    ArgKind::Uint64 => quote!(Arg::Uint64(#ident)),
+                    ArgKind::Float => quote!(Arg::Float(#ident)),
                     ArgKind::String if arg.allow_null => {
                         quote!(Arg::String(#ident.as_deref()))
                     }
                     ArgKind::String => quote!(Arg::String(Some(#ident.as_ref()))),
-                    ArgKind::Object => quote!(Arg::Uint(#ident)),
+                    ArgKind::ObjectId => quote!(Arg::Uint64(#ident)),
                     ArgKind::Array => quote!(Arg::Array(#ident.as_ref())),
                     ArgKind::Fd => unreachable!(),
                 }
@@ -663,12 +676,14 @@ impl<'a> GenContext<'a> {
             _ if arg.interface.is_some() => {
                 let type_name =
                     format_ident!("{}", arg.interface.as_ref().unwrap().to_upper_camel_case());
-                quote!(msg.read_uint().map(#type_name)?)
+                quote!(msg.read_uint64().map(#type_name)?)
             }
-            ArgKind::NewId => quote!(msg.read_uint()?),
-            ArgKind::Int => quote!(msg.read_int()?),
-            ArgKind::Uint => quote!(msg.read_uint()?),
-            ArgKind::Fixed => quote!(msg.read_fixed()?),
+            ArgKind::NewId => quote!(msg.read_uint64()?),
+            ArgKind::Int32 => quote!(msg.read_int32()?),
+            ArgKind::Uint32 => quote!(msg.read_uint32()?),
+            ArgKind::Int64 => quote!(msg.read_int64()?),
+            ArgKind::Uint64 => quote!(msg.read_uint64()?),
+            ArgKind::Float => quote!(msg.read_float()?),
             ArgKind::String if arg.allow_null => {
                 quote!(msg
                     .read_string()
@@ -680,7 +695,7 @@ impl<'a> GenContext<'a> {
                     .map(|opt| opt.unwrap())
                     .map(std::borrow::Cow::Owned)?)
             }
-            ArgKind::Object => quote!(msg.read_uint()?),
+            ArgKind::ObjectId => quote!(msg.read_uint64()?),
             ArgKind::Array => quote!(msg.read_array().map(std::borrow::Cow::Owned)?),
             ArgKind::Fd => quote!(msg.read_fd()?),
         };
@@ -736,11 +751,16 @@ impl<'a> GenContext<'a> {
     }
 }
 
-fn message_type_needs_lifetime(messages: &[Message]) -> bool {
-    messages.iter().any(|message| {
-        message
-            .args
-            .iter()
-            .any(|arg| matches!(arg.kind, ArgKind::String | ArgKind::Array))
-    })
+fn message_type_needs_lifetime(messages: &[Message], context_type: Option<ContextType>) -> bool {
+    messages
+        .iter()
+        .filter(|msg| {
+            context_type.is_none() || msg.context_type.is_none() || msg.context_type == context_type
+        })
+        .any(|message| {
+            message
+                .args
+                .iter()
+                .any(|arg| matches!(arg.kind, ArgKind::String | ArgKind::Array))
+        })
 }

@@ -6,6 +6,8 @@ use std;
 
 use std::fmt::Display;
 
+use crate::ContextType;
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MessageKind {
     Request,
@@ -43,6 +45,7 @@ pub struct Message {
     pub since: u32,
     pub description: Option<Description>,
     pub args: Vec<Arg>,
+    pub context_type: Option<ContextType>,
 }
 
 #[derive(Clone, Default, Debug, Eq, PartialEq)]
@@ -60,11 +63,13 @@ pub struct Arg {
 pub enum ArgKind {
     #[default]
     NewId,
-    Int,
-    Uint,
-    Fixed,
+    Int32,
+    Uint32,
+    Int64,
+    Uint64,
+    Float,
     String,
-    Object,
+    ObjectId,
     Array,
     Fd,
 }
@@ -95,16 +100,30 @@ pub struct Description {
 
 impl FromStr for ArgKind {
     type Err = ();
-    fn from_str(s: &str) -> Result<Self, ()> {
+    fn from_str(s: &str) -> Result<ArgKind, ()> {
         match s {
             "new_id" => Ok(ArgKind::NewId),
-            "int" => Ok(ArgKind::Int),
-            "uint" => Ok(ArgKind::Uint),
-            "fixed" => Ok(ArgKind::Fixed),
+            "int32" => Ok(ArgKind::Int32),
+            "uint32" => Ok(ArgKind::Uint32),
+            "int64" => Ok(ArgKind::Int64),
+            "uint64" => Ok(ArgKind::Uint64),
+            "float" => Ok(ArgKind::Float),
             "string" => Ok(ArgKind::String),
-            "object" => Ok(ArgKind::Object),
+            "object_id" => Ok(ArgKind::ObjectId),
             "array" => Ok(ArgKind::Array),
             "fd" => Ok(ArgKind::Fd),
+            _ => Err(()),
+        }
+    }
+}
+
+
+impl FromStr for ContextType {
+    type Err = ();
+    fn from_str(s: &str) -> Result<ContextType, ()> {
+        match s {
+            "sender" => Ok(ContextType::Sender),
+            "receiver" => Ok(ContextType::Receiver),
             _ => Err(()),
         }
     }
@@ -211,6 +230,7 @@ impl<'a> ParseContext<'a> {
             .map(|t: String| t == "destructor")
             .unwrap_or(false);
         request.since = self.attr("since").unwrap_or(1);
+        request.context_type = self.attr("context-type");
         Some(loop {
             match self.next()? {
                 txml::Event::Open(name, attrs) => {
