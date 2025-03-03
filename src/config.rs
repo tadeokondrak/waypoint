@@ -1,11 +1,7 @@
-use crate::{
-    wl_gen::{WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_VERTICAL_SCROLL},
-    ModIndices,
-};
+use crate::wl_gen::{WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_VERTICAL_SCROLL};
 use anyhow::{bail, ensure, Context, Result};
 use bitflags::bitflags;
 use std::{cmp::Ordering, collections::HashMap, path::PathBuf};
-use xkbcommon::xkb;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Direction {
@@ -49,7 +45,7 @@ bitflags! {
 }
 
 pub(crate) struct Config {
-    bindings: HashMap<(Mods, xkb::Keysym), Vec<Cmd>>,
+    bindings: HashMap<(Mods, kbvm::Keysym), Vec<Cmd>>,
 }
 
 impl Button {
@@ -214,16 +210,15 @@ impl Config {
                                     );
                                 }
                                 None => {
-                                    let parsed_keysym = xkb::keysym_from_name(
-                                        element,
-                                        xkb::KEYSYM_CASE_INSENSITIVE,
-                                    );
-                                    ensure!(
-                                        parsed_keysym != xkb::KEY_NoSymbol,
-                                        "invalid config: line {}: invalid key {:?}",
-                                        binding.line,
-                                        element,
-                                    );
+                                    let Some(parsed_keysym) =
+                                        kbvm::Keysym::from_str_insensitive(element)
+                                    else {
+                                        bail!(
+                                            "invalid config: line {}: invalid key {:?}",
+                                            binding.line,
+                                            element,
+                                        );
+                                    };
                                     ensure!(
                                         keysym.is_none(),
                                         "invalid config: line {}: too many keys",
@@ -254,48 +249,35 @@ impl Config {
 }
 
 pub(crate) fn specialize_bindings(
-    keymap: &xkb::Keymap,
+    keymap: &kbvm::xkb::Keymap,
     config: &Config,
-) -> (ModIndices, HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>) {
-    let state = xkb::State::new(keymap);
-    let mod_indices = ModIndices {
-        shift: keymap.mod_get_index(xkb::MOD_NAME_SHIFT),
-        caps: keymap.mod_get_index(xkb::MOD_NAME_CAPS),
-        ctrl: keymap.mod_get_index(xkb::MOD_NAME_CTRL),
-        alt: keymap.mod_get_index(xkb::MOD_NAME_ALT),
-        num: keymap.mod_get_index(xkb::MOD_NAME_NUM),
-        mod3: keymap.mod_get_index("Mod3"),
-        logo: keymap.mod_get_index(xkb::MOD_NAME_LOGO),
-        mod5: keymap.mod_get_index("Mod5"),
-    };
-
+) -> HashMap<(kbvm::ModifierMask, kbvm::Keysym), Vec<Cmd>> {
+    let lookup_table = keymap.to_builder().build_lookup_table();
     let specialized = config
         .bindings
         .iter()
         .flat_map(|(&(modifiers, keysym), cmds)| {
-            let mut keycodes = Vec::new();
-
-            keymap.key_for_each(|_, keycode| {
-                let got_keysym = state.key_get_one_sym(keycode);
-                if got_keysym != xkb::KEY_NoSymbol && got_keysym == keysym {
-                    keycodes.push(keycode);
+            let mut keysyms = Vec::new();
+            for key in keymap.keys() {
+                let lookup = lookup_table.lookup(
+                    kbvm::GroupIndex::ZERO,
+                    kbvm::ModifierMask::default(),
+                    key.keycode(),
+                );
+                let Some(sym_props) = lookup.into_iter().next() else {
+                    continue;
+                };
+                if sym_props.keysym() == keysym {
+                    keysyms.push(keysym);
                 }
-            });
-
-            let mod_index_array: &[xkb::ModMask; 8] = bytemuck::cast_ref(&mod_indices);
-
-            let mod_mask: xkb::ModMask = modifiers
-                .into_iter()
-                .map(|modifier| 1 << mod_index_array[modifier.bits().trailing_zeros() as usize])
-                .fold(0, |acc, it| acc | it);
-
-            keycodes
+            }
+            let mod_mask = kbvm::ModifierMask(modifiers.bits().into());
+            keysyms
                 .into_iter()
                 .map(move |keycode| ((mod_mask, keycode), cmds.clone()))
         })
         .collect();
-
-    (mod_indices, specialized)
+    specialized
 }
 
 #[cfg(test)]

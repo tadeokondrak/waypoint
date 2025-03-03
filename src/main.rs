@@ -20,7 +20,6 @@ use crate::{
     region::Region,
 };
 use anyhow::{Context as _, Result};
-use bytemuck::{Pod, Zeroable};
 use ei::Object as _;
 use ei_gen::{
     EiButton, EiButtonEvent, EiButtonRequest, EiCallbackEvent, EiConnectionEvent, EiDevice,
@@ -31,13 +30,14 @@ use ei_gen::{
     EI_HANDSHAKE_CONTEXT_TYPE_SENDER,
 };
 use handy::typed::{TypedHandle, TypedHandleMap};
+use kbvm::ModifierMask;
 use memmap2::{MmapMut, MmapOptions};
 use rustix::event::{PollFd, PollFlags};
 use std::{
     collections::{HashMap, HashSet},
     io::Write,
     ops::RangeInclusive,
-    os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd},
+    os::fd::{AsFd, AsRawFd, BorrowedFd},
     time::{Duration, Instant},
 };
 use tiny_skia::{Color, Paint, PathBuilder, Shader, Stroke, Transform};
@@ -59,7 +59,6 @@ use wl_gen::{
     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT, ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
 };
-use xkbcommon::xkb;
 
 type SeatId = TypedHandle<Seat>;
 type OutputId = TypedHandle<Output>;
@@ -94,19 +93,6 @@ struct EiDeviceInterfaces {
     scroll: EiScroll,
 }
 
-#[derive(Default, Clone, Copy)]
-#[repr(C)] // Note: implements Zeroable and Pod
-struct ModIndices {
-    shift: xkb::ModIndex,
-    caps: xkb::ModIndex,
-    ctrl: xkb::ModIndex,
-    alt: xkb::ModIndex,
-    num: xkb::ModIndex,
-    mod3: xkb::ModIndex,
-    logo: xkb::ModIndex,
-    mod5: xkb::ModIndex,
-}
-
 struct Globals {
     wl_shm: WlShm,
     wl_compositor: WlCompositor,
@@ -115,18 +101,20 @@ struct Globals {
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
 
+#[derive(Default)]
 struct Seat {
     wl_seat: WlSeat,
     virtual_pointer: ZwlrVirtualPointerV1,
-    xkb: xkb::Context,
-    xkb_state: Option<xkb::State>,
+    xkb: kbvm::xkb::Context,
+    lookup_table: Option<kbvm::lookup::LookupTable>,
+    group: kbvm::GroupIndex,
+    mods: kbvm::ModifierMask,
     keyboard: WlKeyboard,
     buttons_down: HashSet<u32>,
-    mod_indices: ModIndices,
-    specialized_bindings: HashMap<(xkb::ModMask, xkb::Keycode), Vec<Cmd>>,
+    specialized_bindings: HashMap<(kbvm::ModifierMask, kbvm::Keysym), Vec<Cmd>>,
     repeat_period: Duration,
     repeat_delay: Duration,
-    key_repeat: Option<(Instant, xkb::Keycode)>,
+    key_repeat: Option<(Instant, kbvm::Keycode)>,
 }
 
 #[derive(Default)]
@@ -168,32 +156,11 @@ struct DoubleBuffered<T> {
     current: Option<T>,
 }
 
-unsafe impl Zeroable for ModIndices {}
-unsafe impl Pod for ModIndices {}
-
 impl<T: Clone> DoubleBuffered<T> {
     fn commit(&mut self) {
         match self.current.as_mut() {
             Some(current) => current.clone_from(&self.pending),
             None => self.current = Some(self.pending.clone()),
-        }
-    }
-}
-
-impl Default for Seat {
-    fn default() -> Seat {
-        Seat {
-            xkb: xkb::Context::new(xkb::CONTEXT_NO_FLAGS),
-            wl_seat: Default::default(),
-            virtual_pointer: Default::default(),
-            xkb_state: Default::default(),
-            keyboard: Default::default(),
-            buttons_down: Default::default(),
-            mod_indices: Default::default(),
-            specialized_bindings: Default::default(),
-            key_repeat: Default::default(),
-            repeat_period: Default::default(),
-            repeat_delay: Default::default(),
         }
     }
 }
@@ -213,7 +180,7 @@ impl Output {
 fn handle_key_pressed(
     state: &mut App,
     time: u32,
-    key: u32,
+    keycode: kbvm::Keycode,
     seat_id: SeatId,
     conn: &mut WaylandConnection,
     ei_conn: Option<&mut LibeiConnection>,
@@ -233,23 +200,12 @@ fn handle_key_pressed(
 
     let seat = &mut state.seats[seat_id];
 
-    let keycode = key + 8;
-    let mod_mask = {
-        let Some(xkb_state) = seat.xkb_state.as_mut() else {
-            return;
-        };
-        let keymap = xkb_state.get_keymap();
-        let mut mod_mask: xkb::ModMask = 0;
-        for i in 0..keymap.num_mods() {
-            let is_active = xkb_state.mod_index_is_active(i, xkb::STATE_MODS_EFFECTIVE);
-            let _is_consumed = xkb_state.mod_index_is_consumed(key, i);
-            let is_relevant = i != seat.mod_indices.caps && i != seat.mod_indices.num;
-            if is_active && is_relevant {
-                mod_mask |= 1 << i;
-            }
-        }
-        mod_mask
-    };
+    let lookup =
+        seat.lookup_table
+            .as_ref()
+            .unwrap()
+            .lookup(seat.group, ModifierMask::default(), keycode);
+    let keysym = lookup.into_iter().next().unwrap().keysym();
 
     let mut should_press = None;
     let mut should_release = None;
@@ -257,7 +213,7 @@ fn handle_key_pressed(
 
     for cmd in seat
         .specialized_bindings
-        .get(&(mod_mask, keycode))
+        .get(&(seat.mods, keysym))
         .map(Vec::as_slice)
         .unwrap_or_default()
     {
@@ -1165,7 +1121,7 @@ fn main() -> Result<()> {
             handle_key_pressed(
                 &mut app,
                 0,
-                keycode - 8,
+                keycode,
                 seat_id,
                 &mut wl_conn,
                 ei_conn.as_mut(),
@@ -1377,20 +1333,20 @@ impl App {
                         let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
                         let seat = &mut self.seats[seat_id];
                         let keymap = unsafe {
-                            xkb::Keymap::new_from_fd(
-                                &seat.xkb,
-                                fd.into_raw_fd(),
-                                size as usize,
-                                xkb::KEYMAP_FORMAT_TEXT_V1,
-                                xkb::COMPILE_NO_FLAGS,
+                            let map = MmapOptions::new()
+                                .len(size as usize)
+                                .map_copy_read_only(&fd)
+                                .unwrap();
+                            seat.xkb.keymap_from_bytes(
+                                kbvm::xkb::diagnostic::WriteToStderr,
+                                None,
+                                &map,
                             )
                         }
-                        .ok()
-                        .flatten();
-                        if let Some(keymap) = keymap.as_ref() {
-                            seat.xkb_state = Some(xkb::State::new(keymap));
-                            (seat.mod_indices, seat.specialized_bindings) =
-                                specialize_bindings(keymap, &self.config);
+                        .ok();
+                        if let Some(keymap) = keymap {
+                            seat.lookup_table = Some(keymap.to_builder().build_lookup_table());
+                            seat.specialized_bindings = specialize_bindings(&keymap, &self.config);
                         }
                     }
                 }
@@ -1406,19 +1362,14 @@ impl App {
                     let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
                     let seat = &mut self.seats[seat_id];
                     let key_repeat = seat.key_repeat;
-                    let keycode = key + 8;
-                    let keycode_repeats = seat
-                        .xkb_state
-                        .as_mut()
-                        .unwrap()
-                        .get_keymap()
-                        .key_repeats(keycode);
+                    let keycode = kbvm::Keycode::from_evdev(key);
+                    let keycode_repeats = seat.lookup_table.as_ref().unwrap().repeats(keycode);
                     let repeat_delay = seat.repeat_delay;
 
                     if state == WL_KEYBOARD_KEY_STATE_PRESSED
                         && (key_repeat.is_none() || key_repeat.is_some_and(|(_, it)| it != keycode))
                     {
-                        handle_key_pressed(self, time, key, seat_id, conn, ei_conn);
+                        handle_key_pressed(self, time, keycode, seat_id, conn, ei_conn);
                         if keycode_repeats {
                             let seat_id =
                                 SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
@@ -1445,8 +1396,8 @@ impl App {
                 } => {
                     let seat_id = SeatId::from_raw(conn.ids.data_for(wl_keyboard.id()).data);
                     let seat = &mut self.seats[seat_id];
-                    let state = seat.xkb_state.as_mut().unwrap();
-                    state.update_mask(mods_depressed, mods_latched, mods_locked, 0, 0, group);
+                    seat.group = kbvm::GroupIndex(group);
+                    seat.mods = kbvm::ModifierMask(mods_depressed | mods_latched | mods_locked);
                 }
                 WlKeyboardEvent::RepeatInfo {
                     wl_keyboard,
