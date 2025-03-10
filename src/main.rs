@@ -53,9 +53,10 @@ use wl_gen::{
     ZwlrVirtualPointerV1, ZwlrVirtualPointerV1Request, ZxdgOutputManagerV1,
     ZxdgOutputManagerV1Request, ZxdgOutputV1, ZxdgOutputV1Event, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1,
     WL_KEYBOARD_KEY_STATE_PRESSED, WL_KEYBOARD_KEY_STATE_RELEASED,
-    WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_VERTICAL_SCROLL,
-    WL_POINTER_BUTTON_STATE_PRESSED, WL_POINTER_BUTTON_STATE_RELEASED, WL_SEAT_CAPABILITY_KEYBOARD,
-    WL_SHM_FORMAT_ABGR8888, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM,
+    WL_POINTER_AXIS_HORIZONTAL_SCROLL, WL_POINTER_AXIS_SOURCE_WHEEL,
+    WL_POINTER_AXIS_VERTICAL_SCROLL, WL_POINTER_BUTTON_STATE_PRESSED,
+    WL_POINTER_BUTTON_STATE_RELEASED, WL_SEAT_CAPABILITY_KEYBOARD, WL_SHM_FORMAT_ABGR8888,
+    ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM,
     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT, ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
 };
@@ -300,7 +301,18 @@ fn handle_key_pressed(
                 zwlr_virtual_pointer_v1: seat.virtual_pointer,
                 time,
                 axis,
-                value: wayland::Fixed::from(amount as f32),
+                value: wayland::Fixed::from(amount as f32 * 15.0),
+            });
+            conn.send(ZwlrVirtualPointerV1Request::AxisSource {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                axis_source: WL_POINTER_AXIS_SOURCE_WHEEL,
+            });
+            conn.send(ZwlrVirtualPointerV1Request::AxisDiscrete {
+                zwlr_virtual_pointer_v1: seat.virtual_pointer,
+                time,
+                axis,
+                value: wayland::Fixed::from(amount as f32 * 15.0),
+                discrete: amount.signum() as i32,
             });
             conn.send(ZwlrVirtualPointerV1Request::Frame {
                 zwlr_virtual_pointer_v1: seat.virtual_pointer,

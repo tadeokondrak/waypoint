@@ -415,13 +415,13 @@ impl Debug for Fixed {
 
 impl From<Fixed> for f32 {
     fn from(Fixed(v): Fixed) -> f32 {
-        v as f32 / 128.0
+        v as f32 / 256.0
     }
 }
 
 impl From<f32> for Fixed {
     fn from(value: f32) -> Fixed {
-        Fixed((value * 128.0) as i32)
+        Fixed((value * 256.0) as i32)
     }
 }
 

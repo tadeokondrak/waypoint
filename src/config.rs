@@ -84,10 +84,10 @@ impl Cmd {
             "move-down" => Some(Cmd::Move(Direction::Down)),
             "move-left" => Some(Cmd::Move(Direction::Left)),
             "move-right" => Some(Cmd::Move(Direction::Right)),
-            "scroll-up" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, -10.0)),
-            "scroll-down" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, 10.0)),
-            "scroll-left" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, -10.0)),
-            "scroll-right" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, 10.0)),
+            "scroll-up" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, -1.0)),
+            "scroll-down" => Some(Cmd::Scroll(WL_POINTER_AXIS_VERTICAL_SCROLL, 1.0)),
+            "scroll-left" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, -1.0)),
+            "scroll-right" => Some(Cmd::Scroll(WL_POINTER_AXIS_HORIZONTAL_SCROLL, 1.0)),
             _ => None,
         }
     }
