@@ -375,17 +375,17 @@ fn handle_key_pressed(
         });
 
         for (axis, amount) in should_scroll {
-            ei_conn.send(EiScrollRequest::Scroll {
+            ei_conn.send(EiScrollRequest::ScrollDiscrete {
                 ei_scroll: scroll,
                 x: if axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL {
-                    amount as f32
+                    amount as i32 * 120
                 } else {
-                    0.0
+                    0
                 },
                 y: if axis == WL_POINTER_AXIS_VERTICAL_SCROLL {
-                    amount as f32
+                    amount as i32 * 120
                 } else {
-                    0.0
+                    0
                 },
             });
             ei_conn.send(EiDeviceRequest::Frame {
