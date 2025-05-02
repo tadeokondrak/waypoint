@@ -45,9 +45,10 @@ use wayland::Object as _;
 use wl_gen::{
     Event, Request, WlBuffer, WlBufferEvent, WlBufferRequest, WlCallback, WlCallbackEvent,
     WlCompositor, WlCompositorRequest, WlDisplay, WlDisplayEvent, WlDisplayRequest, WlKeyboard,
-    WlKeyboardEvent, WlOutput, WlOutputEvent, WlPointerEvent, WlRegistry, WlRegistryEvent,
-    WlRegistryRequest, WlSeat, WlSeatEvent, WlSeatRequest, WlShm, WlShmEvent, WlShmPool,
-    WlShmPoolRequest, WlShmRequest, WlSurface, WlSurfaceEvent, WlSurfaceRequest, WlTouchEvent,
+    WlKeyboardEvent, WlOutput, WlOutputEvent, WlPointerEvent, WlRegionRequest, WlRegistry,
+    WlRegistryEvent, WlRegistryRequest, WlSeat, WlSeatEvent, WlSeatRequest, WlShm, WlShmEvent,
+    WlShmPool, WlShmPoolRequest, WlShmRequest, WlSurface, WlSurfaceEvent, WlSurfaceRequest,
+    WlTouchEvent, WpSinglePixelBufferManagerV1, WpSinglePixelBufferManagerV1Request,
     ZwlrLayerShellV1, ZwlrLayerShellV1Request, ZwlrLayerSurfaceV1, ZwlrLayerSurfaceV1Event,
     ZwlrLayerSurfaceV1Request, ZwlrVirtualPointerManagerV1, ZwlrVirtualPointerManagerV1Request,
     ZwlrVirtualPointerV1, ZwlrVirtualPointerV1Request, ZxdgOutputManagerV1,
@@ -59,6 +60,7 @@ use wl_gen::{
     ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY, ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM,
     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT, ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT,
     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+    ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE,
 };
 
 type SeatId = TypedHandle<Seat>;
@@ -74,8 +76,10 @@ struct App {
     config: Config,
     region: Region,
     region_history: Vec<Region>,
-    global_bounds: Region,
+    global_bounds: Option<Region>,
     ei_state: EiState,
+    input_surface: Option<Surface>,
+    default_region: Option<Region>,
 }
 
 #[derive(Default)]
@@ -99,6 +103,7 @@ struct Globals {
     wl_compositor: WlCompositor,
     xdg_output: ZxdgOutputManagerV1,
     layer_shell: ZwlrLayerShellV1,
+    single_pixel_buffer: WpSinglePixelBufferManagerV1,
     virtual_pointer_manager: ZwlrVirtualPointerManagerV1,
 }
 
@@ -230,7 +235,7 @@ fn handle_key_pressed(
             Cmd::Cut(dir) => update(
                 &mut state.region,
                 &mut state.region_history,
-                state.global_bounds,
+                state.global_bounds.unwrap_or_default(),
                 match dir {
                     Direction::Up => Region::cut_up,
                     Direction::Down => Region::cut_down,
@@ -241,7 +246,7 @@ fn handle_key_pressed(
             Cmd::Move(dir) => update(
                 &mut state.region,
                 &mut state.region_history,
-                state.global_bounds,
+                state.global_bounds.unwrap_or_default(),
                 match dir {
                     Direction::Up => Region::move_up,
                     Direction::Down => Region::move_down,
@@ -266,31 +271,14 @@ fn handle_key_pressed(
         }
     }
 
-    for output in state.outputs.iter() {
-        let surface = output.surface.as_ref().unwrap();
-        draw(
-            &state.globals,
-            &mut state.buffers,
-            conn,
-            output.state.current.as_ref().unwrap().integer_scale,
-            surface,
-            Region {
-                x: state.region.x - output.state.current.unwrap().logical_x,
-                y: state.region.y - output.state.current.unwrap().logical_y,
-                ..state.region
-            },
-        )
-        .unwrap();
-    }
-
     if !seat.virtual_pointer.is_null() {
         conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
             zwlr_virtual_pointer_v1: seat.virtual_pointer,
             time,
             x: state.region.center().x as u32,
             y: state.region.center().y as u32,
-            x_extent: state.global_bounds.width as u32,
-            y_extent: state.global_bounds.height as u32,
+            x_extent: state.global_bounds.unwrap_or_default().width as u32,
+            y_extent: state.global_bounds.unwrap_or_default().height as u32,
         });
         conn.send(ZwlrVirtualPointerV1Request::Frame {
             zwlr_virtual_pointer_v1: seat.virtual_pointer,
@@ -429,6 +417,27 @@ fn handle_key_pressed(
             ei_device: device,
             last_serial: state.ei_state.last_serial,
         });
+    }
+
+    redraw_all_outputs(state, conn);
+}
+
+fn redraw_all_outputs(state: &mut App, conn: &mut WaylandConnection) {
+    for output in state.outputs.iter() {
+        let surface = output.surface.as_ref().unwrap();
+        draw(
+            &state.globals,
+            &mut state.buffers,
+            conn,
+            output.state.current.as_ref().unwrap().integer_scale,
+            surface,
+            Region {
+                x: state.region.x - output.state.current.unwrap().logical_x,
+                y: state.region.y - output.state.current.unwrap().logical_y,
+                ..state.region
+            },
+        )
+        .unwrap();
     }
 }
 
@@ -750,9 +759,19 @@ impl WaylandConnection {
                 }
             }
             match event {
-                Event::WlDisplay(WlDisplayEvent::DeleteId { wl_display: _, id }) => {
-                    self.ids.release(id);
-                }
+                Event::WlDisplay(event) => match event {
+                    WlDisplayEvent::Error {
+                        wl_display: _,
+                        object_id,
+                        code,
+                        message,
+                    } => {
+                        panic!("Protocol error {code} on object {object_id}: {message}")
+                    }
+                    WlDisplayEvent::DeleteId { wl_display: _, id } => {
+                        self.ids.release(id);
+                    }
+                },
                 Event::WlCallback(WlCallbackEvent::Done {
                     wl_callback,
                     callback_data: _,
@@ -896,6 +915,8 @@ fn main() -> Result<()> {
                 .context("compositor doesn't support xdg_output_manager_v1")?,
             layer_shell: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
                 .context("compositor doesn't support zwlr_layer_shell_v1")?,
+            single_pixel_buffer: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
+                .context("compositor doesn't support wp_single_pixel_buffer_manager_v1")?,
             virtual_pointer_manager: bind_global(&mut wl_conn, wl_registry, &global_list, 1..=1)
                 .unwrap_or_default(),
         },
@@ -905,8 +926,10 @@ fn main() -> Result<()> {
         config: Config::load()?,
         region: Region::default(),
         region_history: Vec::new(),
-        global_bounds: Region::default(),
+        global_bounds: None,
         ei_state: EiState::default(),
+        input_surface: None,
+        default_region: None,
     };
 
     if let Some(seat_list) = global_list.get(wl_gen::Interface::WlSeat.name()) {
@@ -968,19 +991,56 @@ fn main() -> Result<()> {
         app.handle_event(conn, ei_conn.as_mut(), event);
     });
 
-    for output in app.outputs.iter() {
-        app.global_bounds = app.global_bounds.union(&output.region());
-    }
+    {
+        app.input_surface = Some(Surface::default());
+        let surface = app.input_surface.as_mut().unwrap();
+        let wl_surface = wl_conn.send_constructor(OutputId::EMPTY.into_raw(), |id| {
+            WlCompositorRequest::CreateSurface {
+                wl_compositor: app.globals.wl_compositor,
+                id,
+            }
+        });
+        let layer_surface = wl_conn.send_constructor(OutputId::EMPTY.into_raw(), |id| {
+            ZwlrLayerShellV1Request::GetLayerSurface {
+                zwlr_layer_shell_v1: app.globals.layer_shell,
+                id,
+                surface: wl_surface,
+                output: WlOutput(0),
+                layer: ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+                namespace: "waypoint.input".into(),
+            }
+        });
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+            zwlr_layer_surface_v1: layer_surface,
+            width: 1,
+            height: 1,
+        });
+        wl_conn.send(ZwlrLayerSurfaceV1Request::SetKeyboardInteractivity {
+            zwlr_layer_surface_v1: layer_surface,
+            keyboard_interactivity: ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+        });
+        let region = wl_conn.send_constructor(0, |id| WlCompositorRequest::CreateRegion {
+            wl_compositor: app.globals.wl_compositor,
+            id,
+        });
+        wl_conn.send(WlSurfaceRequest::SetInputRegion { wl_surface, region });
+        wl_conn.send(WlRegionRequest::Destroy { wl_region: region });
+        wl_conn.send(WlSurfaceRequest::Commit { wl_surface });
 
-    app.region = app.global_bounds;
+        surface.output = OutputId::EMPTY;
+        surface.wl_surface = wl_surface;
+        surface.layer_surface = layer_surface;
+    }
 
     for (output_id, output) in app.outputs.iter_mut_with_handles() {
         output.surface = Some(Surface::default());
         let surface = output.surface.as_mut().unwrap();
 
-        let wl_surface = wl_conn.send_constructor(0, |id| WlCompositorRequest::CreateSurface {
-            wl_compositor: app.globals.wl_compositor,
-            id,
+        let wl_surface = wl_conn.send_constructor(output_id.into_raw(), |id| {
+            WlCompositorRequest::CreateSurface {
+                wl_compositor: app.globals.wl_compositor,
+                id,
+            }
         });
         let layer_surface = wl_conn.send_constructor(output_id.into_raw(), |id| {
             ZwlrLayerShellV1Request::GetLayerSurface {
@@ -989,7 +1049,7 @@ fn main() -> Result<()> {
                 surface: wl_surface,
                 output: output.wl_output,
                 layer: ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
-                namespace: "waypoint".into(),
+                namespace: "waypoint.drawing".into(),
             }
         });
         wl_conn.send(ZwlrLayerSurfaceV1Request::SetSize {
@@ -1010,13 +1070,14 @@ fn main() -> Result<()> {
         });
         wl_conn.send(ZwlrLayerSurfaceV1Request::SetKeyboardInteractivity {
             zwlr_layer_surface_v1: layer_surface,
-            keyboard_interactivity: ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_EXCLUSIVE,
+            keyboard_interactivity: ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE,
         });
         let region = wl_conn.send_constructor(0, |id| WlCompositorRequest::CreateRegion {
             wl_compositor: app.globals.wl_compositor,
             id,
         });
         wl_conn.send(WlSurfaceRequest::SetInputRegion { wl_surface, region });
+        wl_conn.send(WlRegionRequest::Destroy { wl_region: region });
         wl_conn.send(WlSurfaceRequest::Commit { wl_surface });
 
         surface.output = output_id;
@@ -1030,6 +1091,18 @@ fn main() -> Result<()> {
         ei_conn.handle_events(|ei_conn, event| app.handle_ei_event(ei_conn, event));
     }
 
+    wl_conn.roundtrip(|conn, event| {
+        app.handle_event(conn, ei_conn.as_mut(), event);
+    });
+
+    let global_bounds = app
+        .outputs
+        .iter()
+        .fold(Region::default(), |acc, output| acc.union(&output.region()));
+    app.global_bounds = Some(global_bounds);
+    app.region = app.default_region.unwrap_or(global_bounds);
+    redraw_all_outputs(&mut app, &mut wl_conn);
+
     for seat in app.seats.iter() {
         if !seat.virtual_pointer.is_null() {
             wl_conn.send(ZwlrVirtualPointerV1Request::MotionAbsolute {
@@ -1037,8 +1110,8 @@ fn main() -> Result<()> {
                 time: 0,
                 x: app.region.center().x as u32,
                 y: app.region.center().y as u32,
-                x_extent: app.global_bounds.width as u32,
-                y_extent: app.global_bounds.height as u32,
+                x_extent: app.global_bounds.unwrap_or_default().width as u32,
+                y_extent: app.global_bounds.unwrap_or_default().height as u32,
             });
             wl_conn.send(ZwlrVirtualPointerV1Request::Frame {
                 zwlr_virtual_pointer_v1: seat.virtual_pointer,
@@ -1464,7 +1537,15 @@ impl App {
             },
 
             Event::WlSurface(event) => match event {
-                WlSurfaceEvent::Enter { .. } => {}
+                WlSurfaceEvent::Enter { wl_surface, output } => {
+                    let surface_data = conn.ids.data_for(wl_surface.id()).data;
+                    if surface_data == OutputId::EMPTY.into_raw() {
+                        let output_data = conn.ids.data_for(output.id()).data;
+                        let output_id = OutputId::from_raw(output_data);
+                        let output = &mut self.outputs[output_id];
+                        self.default_region = Some(output.region());
+                    }
+                }
                 WlSurfaceEvent::Leave { .. } => {}
             },
             Event::ZwlrLayerSurfaceV1(event) => match event {
@@ -1474,34 +1555,75 @@ impl App {
                     width,
                     height,
                 } => {
-                    let output_id =
-                        OutputId::from_raw(conn.ids.data_for(zwlr_layer_surface_v1.id()).data);
-                    let output = &mut self.outputs[output_id];
-                    let surface = output.surface.as_mut().unwrap();
-                    conn.send(ZwlrLayerSurfaceV1Request::AckConfigure {
-                        zwlr_layer_surface_v1,
-                        serial,
-                    });
-                    conn.send(ZwlrLayerSurfaceV1Request::SetSize {
-                        zwlr_layer_surface_v1,
-                        width,
-                        height,
-                    });
-                    surface.width = width;
-                    surface.height = height;
-                    draw(
-                        &self.globals,
-                        &mut self.buffers,
-                        conn,
-                        output.state.current.as_ref().unwrap().integer_scale,
-                        surface,
-                        Region {
-                            x: self.region.x - output.state.current.unwrap().logical_x,
-                            y: self.region.y - output.state.current.unwrap().logical_y,
-                            ..self.region
-                        },
-                    )
-                    .unwrap();
+                    let layer_surface_data = conn.ids.data_for(zwlr_layer_surface_v1.id()).data;
+                    if layer_surface_data == OutputId::EMPTY.into_raw() {
+                        let surface = self.input_surface.as_mut().unwrap();
+                        // this is the input surface
+                        conn.send(ZwlrLayerSurfaceV1Request::AckConfigure {
+                            zwlr_layer_surface_v1,
+                            serial,
+                        });
+                        conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+                            zwlr_layer_surface_v1,
+                            width: 1,
+                            height: 1,
+                        });
+                        let buffer = conn.send_constructor(0, |id| {
+                            WpSinglePixelBufferManagerV1Request::CreateU32RgbaBuffer {
+                                wp_single_pixel_buffer_manager_v1: self.globals.single_pixel_buffer,
+                                id,
+                                r: 0,
+                                g: 0,
+                                b: 0,
+                                a: 0,
+                            }
+                        });
+                        conn.send(WlSurfaceRequest::Attach {
+                            wl_surface: surface.wl_surface,
+                            buffer,
+                            x: 0,
+                            y: 0,
+                        });
+                        conn.send(WlSurfaceRequest::DamageBuffer {
+                            wl_surface: surface.wl_surface,
+                            x: 0,
+                            y: 0,
+                            width: i32::MAX,
+                            height: i32::MAX,
+                        });
+                        conn.send(WlBufferRequest::Destroy { wl_buffer: buffer });
+                        conn.send(WlSurfaceRequest::Commit {
+                            wl_surface: surface.wl_surface,
+                        });
+                    } else {
+                        let output_id = OutputId::from_raw(layer_surface_data);
+                        let output = &mut self.outputs[output_id];
+                        let surface = output.surface.as_mut().unwrap();
+                        conn.send(ZwlrLayerSurfaceV1Request::AckConfigure {
+                            zwlr_layer_surface_v1,
+                            serial,
+                        });
+                        conn.send(ZwlrLayerSurfaceV1Request::SetSize {
+                            zwlr_layer_surface_v1,
+                            width,
+                            height,
+                        });
+                        surface.width = width;
+                        surface.height = height;
+                        draw(
+                            &self.globals,
+                            &mut self.buffers,
+                            conn,
+                            output.state.current.as_ref().unwrap().integer_scale,
+                            surface,
+                            Region {
+                                x: self.region.x - output.state.current.unwrap().logical_x,
+                                y: self.region.y - output.state.current.unwrap().logical_y,
+                                ..self.region
+                            },
+                        )
+                        .unwrap();
+                    }
                 }
                 ZwlrLayerSurfaceV1Event::Closed {
                     zwlr_layer_surface_v1,
@@ -1528,10 +1650,7 @@ impl App {
             Event::WlCallback(event) => match event {
                 WlCallbackEvent::Done { .. } => {}
             },
-            Event::WlDisplay(event) => match event {
-                WlDisplayEvent::Error { .. } => {}
-                WlDisplayEvent::DeleteId { .. } => {}
-            },
+            Event::WlDisplay(_) => unreachable!("handled elsewhere"),
             Event::WlPointer(event) => match event {
                 WlPointerEvent::Enter { .. } => {}
                 WlPointerEvent::Leave { .. } => {}
