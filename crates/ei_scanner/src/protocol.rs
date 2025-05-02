@@ -1,12 +1,8 @@
-use std::str::FromStr;
-
-use std::fmt::Debug;
-
-use std;
-
-use std::fmt::Display;
-
 use crate::ContextType;
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MessageKind {
@@ -116,7 +112,6 @@ impl FromStr for ArgKind {
         }
     }
 }
-
 
 impl FromStr for ContextType {
     type Err = ();

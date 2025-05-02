@@ -3,6 +3,7 @@ mod protocol;
 use crate::protocol::{Arg, ArgKind, Enum, Interface, Message, MessageKind, ParseContext};
 use heck::{ToShoutySnakeCase, ToSnakeCase, ToUpperCamelCase};
 use proc_macro2::TokenStream;
+use protocol::Description;
 use quote::{format_ident, quote, ToTokens};
 use std::{cmp::max, collections::BTreeMap, iter, path::PathBuf};
 
@@ -276,19 +277,20 @@ impl<'a> GenContext<'a> {
                 fn id(self) -> u64 { self.0 }
             }
         };
-
         let request_enums = self.gen_messages(interface, &interface.requests, MessageKind::Request);
         let event_enums = self.gen_messages(interface, &interface.events, MessageKind::Event);
         let enum_values = interface
             .enums
             .iter()
             .map(|enm| self.gen_interface_enum(interface, enm));
+        let doc = self.gen_doc_attr(interface.description.as_ref());
         if interface.version == 0 {
             quote! {
                 #interface_struct
             }
         } else {
             quote! {
+                #doc
                 #interface_struct
                 #interface_struct_object_impl
                 #(#enum_values)*
@@ -357,7 +359,9 @@ impl<'a> GenContext<'a> {
             .args
             .iter()
             .map(|arg| self.gen_message_enum_variant_field(arg));
+        let doc = self.gen_doc_attr(message.description.as_ref());
         quote! {
+            #doc
             #variant_name {
                 #interface_field_name: #interface_type_name,
                 #(#fields)*
@@ -368,7 +372,9 @@ impl<'a> GenContext<'a> {
     fn gen_message_enum_variant_field(&self, arg: &Arg) -> TokenStream {
         let field_name = format_ident!("{}", arg.name.to_snake_case());
         let field_type = self.gen_arg_field_type(arg);
+        let doc = self.gen_doc_attr_with_summary(arg.summary.as_deref(), arg.description.as_ref());
         quote! {
+            #doc
             #field_name: #field_type,
         }
     }
@@ -511,7 +517,9 @@ impl<'a> GenContext<'a> {
                 pub const #since_name: u32 = #since;
             }
         });
+        let doc = self.gen_doc_attr(enm.description.as_ref());
         quote!(
+            #doc
             pub const #since_name: u32 = #since;
             #(#entries)*
         )
@@ -763,6 +771,37 @@ impl<'a> GenContext<'a> {
             }
         }
     }
+
+    fn gen_doc_attr_with_summary(
+        &self,
+        summary: Option<&str>,
+        description: Option<&Description>,
+    ) -> TokenStream {
+        debug_assert!(
+            !(summary.is_some() && description.is_some()),
+            "something has both a summary attribute and a description element",
+        );
+        let summary = summary
+            .map(|summary| format!(" {summary}"))
+            .map(|summary| quote!(#[doc = #summary]));
+        let description = self.gen_doc_attr(description);
+        quote! {
+            #summary
+            #description
+        }
+    }
+
+    fn gen_doc_attr(&self, description: Option<&Description>) -> TokenStream {
+        let Some(Description { summary, body }) = description else {
+            return quote!();
+        };
+        let body = trim_multiline(body);
+        let text = format!(" {}\n\n ---\n\n{}\n", summary.trim(), body.trim_end());
+        let lines = text.lines().map(|line| quote!(#[doc = #line]));
+        quote! {
+            #(#lines)*
+        }
+    }
 }
 
 fn message_type_needs_lifetime(messages: &[Message], context_type: Option<ContextType>) -> bool {
@@ -777,4 +816,53 @@ fn message_type_needs_lifetime(messages: &[Message], context_type: Option<Contex
                 .iter()
                 .any(|arg| matches!(arg.kind, ArgKind::String | ArgKind::Array))
         })
+}
+
+fn trim_multiline(s: &str) -> String {
+    let mut common_prefix: Option<&str> = None;
+    for line in s.lines() {
+        let Some(i) = line.find(|c: char| !c.is_whitespace()) else {
+            continue;
+        };
+        let ws = &line[..i];
+        if ws.is_empty() {
+            continue;
+        }
+        match common_prefix {
+            Some(cp) => {
+                if ws == cp {
+                    continue;
+                }
+                // If cp is prefix to ws, we don't care.
+                if ws.strip_prefix(cp).is_some() {
+                    continue;
+                }
+                // If ws is prefix to cp, we shrink cp.
+                if let Some(not_common) = cp.strip_prefix(ws) {
+                    let newcp_len = cp.len() - not_common.len();
+                    let newcp = &cp[..newcp_len];
+                    common_prefix = Some(newcp);
+                }
+            }
+            None => common_prefix = Some(ws),
+        }
+    }
+    let mut result = String::new();
+    let mut nonempty_line_added = false;
+    for line in s.lines() {
+        if line.trim().is_empty() {
+            if nonempty_line_added {
+                result.push('\n');
+            }
+            continue;
+        }
+        result.push(' ');
+        result.push_str(
+            line.strip_prefix(common_prefix.unwrap_or(""))
+                .unwrap_or(line),
+        );
+        result.push('\n');
+        nonempty_line_added = true;
+    }
+    result
 }

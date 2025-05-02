@@ -1,10 +1,7 @@
-use std::str::FromStr;
-
-use std::fmt::Debug;
-
-use std;
-
-use std::fmt::Display;
+use std::{
+    fmt::{Debug, Display},
+    str::FromStr,
+};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MessageKind {
