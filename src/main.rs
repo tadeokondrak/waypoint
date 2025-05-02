@@ -1628,10 +1628,14 @@ impl App {
                 ZwlrLayerSurfaceV1Event::Closed {
                     zwlr_layer_surface_v1,
                 } => {
-                    let output_id =
-                        OutputId::from_raw(conn.ids.data_for(zwlr_layer_surface_v1.id()).data);
-                    let output = &mut self.outputs[output_id];
-                    output.surface = None;
+                    let layer_surface_data = conn.ids.data_for(zwlr_layer_surface_v1.id()).data;
+                    if layer_surface_data != OutputId::EMPTY.into_raw() {
+                        let output_id = OutputId::from_raw(layer_surface_data);
+                        let output = &mut self.outputs[output_id];
+                        output.surface = None;
+                    } else {
+                        // TODO
+                    }
                 }
             },
             Event::WlBuffer(event) => match event {
