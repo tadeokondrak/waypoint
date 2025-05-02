@@ -500,6 +500,12 @@ impl<'a> GenContext<'a> {
     }
 
     fn gen_interface_enum(&self, interface: &Interface, enm: &Enum) -> TokenStream {
+        let since_name = format_ident!(
+            "{}_{}_SINCE_VERSION",
+            interface.name.to_shouty_snake_case(),
+            enm.name.to_shouty_snake_case(),
+        );
+        let since = enm.since;
         let entries = enm.entries.iter().map(|entry| {
             let const_name = format_ident!(
                 "{}_{}_{}",
@@ -507,12 +513,18 @@ impl<'a> GenContext<'a> {
                 enm.name.to_shouty_snake_case(),
                 entry.name.to_shouty_snake_case(),
             );
+            let since_name = format_ident!("{const_name}_SINCE_VERSION");
+            let since = entry.since;
             let value = entry.value;
             quote! {
                 pub const #const_name: u32 = #value;
+                pub const #since_name: u32 = #since;
             }
         });
-        quote!(#(#entries)*)
+        quote!(
+            pub const #since_name: u32 = #since;
+            #(#entries)*
+        )
     }
 
     fn gen_message_unmarshaler(
