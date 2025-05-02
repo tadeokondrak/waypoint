@@ -669,7 +669,7 @@ impl LibeiConnection {
         O::new(id)
     }
 
-    fn handle_events(&mut self, mut handler: impl FnMut(&mut LibeiConnection, ei_gen::Event)) {
+    fn handle_events(&mut self, mut handler: impl FnMut(&mut LibeiConnection, ei_gen::Event<'_>)) {
         while let Some(event) = self.wire.read_message(|msg| {
             ei_gen::Event::unmarshal(self.interfaces.get(&msg.object()).copied().unwrap(), msg)
         }) {
@@ -738,7 +738,7 @@ impl WaylandConnection {
         O::new(id)
     }
 
-    fn handle_events(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event)) {
+    fn handle_events(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event<'_>)) {
         while let Some(event) = self
             .wire
             .read_message(|msg| Event::unmarshal(self.ids.data_for(msg.object()).interface, msg))
@@ -764,7 +764,7 @@ impl WaylandConnection {
         }
     }
 
-    fn roundtrip(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event)) {
+    fn roundtrip(&mut self, mut handler: impl FnMut(&mut WaylandConnection, Event<'_>)) {
         self.sync_done = false;
         self.sync_callback = self.send_constructor(0, |callback| WlDisplayRequest::Sync {
             wl_display: WlDisplay(1),
