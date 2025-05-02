@@ -264,9 +264,8 @@ impl<'a> GenContext<'a> {
             quote!()
         };
         let interface_struct = quote! {
-            #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+            #[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Hash)]
             pub struct #type_name(pub u64);
-
         };
         let interface_struct_object_impl = quote! {
             impl Object<Interface> for #type_name {
@@ -730,7 +729,7 @@ impl<'a> GenContext<'a> {
                     }
                 });
         quote! {
-            #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+            #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
             pub enum Interface {
                 #(#variants,)*
             }
