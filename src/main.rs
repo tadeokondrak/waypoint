@@ -30,7 +30,6 @@ use ei_gen::{
     EI_HANDSHAKE_CONTEXT_TYPE_SENDER,
 };
 use handy::typed::{TypedHandle, TypedHandleMap};
-use kbvm::ModifierMask;
 use memmap2::{MmapMut, MmapOptions};
 use rustix::event::{PollFd, PollFlags};
 use std::{
@@ -210,7 +209,7 @@ fn handle_key_pressed(
         seat.lookup_table
             .as_ref()
             .unwrap()
-            .lookup(seat.group, ModifierMask::default(), keycode);
+            .lookup(seat.group, kbvm::ModifierMask::default(), keycode);
     let keysym = lookup.into_iter().next().unwrap().keysym();
 
     let mut should_press = None;
@@ -1444,11 +1443,21 @@ impl App {
                                 .len(size as usize)
                                 .map_copy_read_only(&fd)
                                 .unwrap();
-                            seat.xkb.keymap_from_bytes(
-                                kbvm::xkb::diagnostic::WriteToStderr,
-                                None,
-                                &map,
-                            )
+                            let mut diagnostics = Vec::new();
+                            let keymap_result =
+                                seat.xkb.keymap_from_bytes(&mut diagnostics, None, &map);
+                            for diagnostic in diagnostics {
+                                match diagnostic.kind().severity() {
+                                    kbvm::xkb::diagnostic::Severity::Debug => {}
+                                    _ => {
+                                        eprintln!("{}", diagnostic.with_code());
+                                    }
+                                }
+                            }
+                            if let Err(e) = &keymap_result {
+                                eprintln!("Error compiling keymap: {e}");
+                            }
+                            keymap_result
                         }
                         .ok();
                         if let Some(keymap) = keymap {
