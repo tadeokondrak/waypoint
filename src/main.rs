@@ -151,8 +151,8 @@ struct Surface {
 
 #[derive(Default)]
 struct Buffer {
-    pool: WlShmPool,
     wl_buffer: WlBuffer,
+    pool: Option<WlShmPool>,
     mmap: Option<MmapMut>,
 }
 
@@ -573,6 +573,28 @@ fn draw_inner(
     );
 }
 
+fn make_single_pixel_buffer(
+    globals: &Globals,
+    buffers: &mut TypedHandleMap<Buffer>,
+    conn: &mut WaylandConnection,
+    (r, g, b, a): (u32, u32, u32, u32),
+) -> BufferId {
+    let buffer_id = buffers.insert(Buffer::default());
+    let this = &mut buffers[buffer_id];
+    let wl_buffer = conn.send_constructor(buffer_id.into_raw(), |id| {
+        WpSinglePixelBufferManagerV1Request::CreateU32RgbaBuffer {
+            wp_single_pixel_buffer_manager_v1: globals.single_pixel_buffer,
+            id,
+            r,
+            g,
+            b,
+            a,
+        }
+    });
+    this.wl_buffer = wl_buffer;
+    buffer_id
+}
+
 fn make_buffer(
     globals: &Globals,
     buffers: &mut TypedHandleMap<Buffer>,
@@ -606,7 +628,7 @@ fn make_buffer(
             format,
         });
     let mmap = unsafe { MmapOptions::new().len(len_usize).map_mut(memfd.as_file())? };
-    this.pool = wl_shm_pool;
+    this.pool = Some(wl_shm_pool);
     this.wl_buffer = wl_buffer;
     this.mmap = Some(mmap);
     Ok(buffer_id)
@@ -1568,19 +1590,16 @@ impl App {
                             width: 1,
                             height: 1,
                         });
-                        let buffer = conn.send_constructor(0, |id| {
-                            WpSinglePixelBufferManagerV1Request::CreateU32RgbaBuffer {
-                                wp_single_pixel_buffer_manager_v1: self.globals.single_pixel_buffer,
-                                id,
-                                r: 0,
-                                g: 0,
-                                b: 0,
-                                a: 0,
-                            }
-                        });
+                        let buffer_id = make_single_pixel_buffer(
+                            &self.globals,
+                            &mut self.buffers,
+                            conn,
+                            (0, 0, 0, 0),
+                        );
+                        let buffer = &mut self.buffers[buffer_id];
                         conn.send(WlSurfaceRequest::Attach {
                             wl_surface: surface.wl_surface,
-                            buffer,
+                            buffer: buffer.wl_buffer,
                             x: 0,
                             y: 0,
                         });
@@ -1591,7 +1610,6 @@ impl App {
                             width: i32::MAX,
                             height: i32::MAX,
                         });
-                        conn.send(WlBufferRequest::Destroy { wl_buffer: buffer });
                         conn.send(WlSurfaceRequest::Commit {
                             wl_surface: surface.wl_surface,
                         });
@@ -1642,8 +1660,9 @@ impl App {
                 WlBufferEvent::Release { wl_buffer } => {
                     let buffer_id = BufferId::from_raw(conn.ids.data_for(wl_buffer.id()).data);
                     let buffer = &mut self.buffers[buffer_id];
-                    let wl_shm_pool = buffer.pool;
-                    conn.send(WlShmPoolRequest::Destroy { wl_shm_pool });
+                    if let Some(wl_shm_pool) = buffer.pool {
+                        conn.send(WlShmPoolRequest::Destroy { wl_shm_pool });
+                    }
                     conn.send(WlBufferRequest::Destroy { wl_buffer });
                     self.buffers.remove(buffer_id);
                 }
