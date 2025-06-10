@@ -177,7 +177,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "protocol" => break protocol,
                 txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -189,7 +192,7 @@ impl<'a> ParseContext<'a> {
                 txml::Event::Text(text) => body.extend(text),
                 txml::Event::Close(name) if name == "copyright" => break body,
                 txml::Event::Open(..) | txml::Event::Close(..) => return None,
-                txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Comment(..) | txml::Event::Doctype(..) | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -212,7 +215,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "interface" => break interface,
                 txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -238,7 +244,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "request" || name == "event" => break request,
                 txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -259,7 +268,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "arg" => break arg,
                 txml::Event::Open(..) | txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -281,7 +293,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "enum" => break enumeration,
                 txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -308,7 +323,10 @@ impl<'a> ParseContext<'a> {
                 }
                 txml::Event::Close(name) if name == "entry" => break entry,
                 txml::Event::Open(..) | txml::Event::Close(..) => return None,
-                txml::Event::Text(..) | txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Text(..)
+                | txml::Event::Comment(..)
+                | txml::Event::Doctype(..)
+                | txml::Event::Pi(..) => {}
             }
         })
     }
@@ -323,7 +341,7 @@ impl<'a> ParseContext<'a> {
                     break description;
                 }
                 txml::Event::Open(..) | txml::Event::Close(..) => return None,
-                txml::Event::Comment(..) | txml::Event::Pi(..) => {}
+                txml::Event::Comment(..) | txml::Event::Doctype(..) | txml::Event::Pi(..) => {}
             }
         })
     }
